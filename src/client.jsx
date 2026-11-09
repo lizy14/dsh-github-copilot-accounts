@@ -9,6 +9,7 @@
 // （octicons copilot-16，fill=currentColor，浅/深主题自动一致）。
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { createAvatarRecovery } from "./avatar-recovery.mjs";
 
 export const name = "copilot-auth-ui";
 export const inject = ["slots", "locale"];
@@ -305,12 +306,33 @@ const styles = {
     fontFamily: "inherit" },
 };
 
-// 头像：外链（avatars.githubusercontent.com）可能被 CSP 拦截，onError 回落
-// 首字母圆。
-function Avatar({ src, name, size = 36 }) {
-  const [broken, setBroken] = useState(false);
+// Both avatar views use the same one-shot profile recovery. URL changes reset
+// failed state; the returned URL is retried unchanged, including its signature.
+function useAvatarRecovery(id, src, onRecovered) {
+  const controllerRef = useRef(null);
+  if (controllerRef.current === null) controllerRef.current = createAvatarRecovery();
+  const controller = controllerRef.current;
+  controller.configure(id, src);
+  const callbackRef = useRef(onRecovered);
+  callbackRef.current = onRecovered;
+  const [, rerender] = useState(0);
+  useEffect(() => {
+    const unsubscribe = controller.subscribe(() => rerender((value) => value + 1));
+    controller.mount();
+    // A cached image can fail before the passive effect subscribes. Synchronize
+    // the current snapshot once, including any error/recovery in that gap.
+    rerender((value) => value + 1);
+    return () => { unsubscribe(); controller.unmount(); };
+  }, [controller]);
+  const state = controller.snapshot();
+  return { ...state, onError: () => { void controller.fail(state.revision, () => callbackRef.current?.()); } };
+}
+
+// Loading failures keep the initial-letter fallback while one refresh is pending.
+function Avatar({ id, src, name, size = 36, onRecovered }) {
+  const image = useAvatarRecovery(id, src, onRecovered);
   const initial = (name ?? "?").trim().charAt(0).toUpperCase() || "?";
-  if (!src || broken) {
+  if (!image.source || image.failed) {
     return (
       <div style={{ ...styles.avatarFallback, width: size, height: size, fontSize: Math.round(size * 0.45) }}>
         {initial}
@@ -318,8 +340,8 @@ function Avatar({ src, name, size = 36 }) {
     );
   }
   return (
-    <img src={src} alt="" width={size} height={size} style={styles.avatar}
-      onError={() => setBroken(true)} />
+    <img key={image.revision} src={image.source} alt="" width={size} height={size} style={styles.avatar}
+      referrerPolicy="no-referrer" onError={image.onError} />
   );
 }
 
@@ -358,12 +380,12 @@ function UsageBlock({ t, plan, usage, usageError }) {
   );
 }
 
-function AccountCard({ t, account, busy, menuOpen, onToggleMenu, onActivate, onLogout, onUpdateAuth, onManagePlan }) {
+function AccountCard({ t, account, busy, menuOpen, onToggleMenu, onActivate, onLogout, onUpdateAuth, onManagePlan, onAvatarRecovered }) {
   const title = account.name ?? account.login ?? t("legacyAccount");
   return (
     <div style={styles.card}>
       <div style={styles.cardTop}>
-        <Avatar src={account.avatarUrl} name={account.name ?? account.login} />
+        <Avatar id={account.id} src={account.avatarUrl} name={account.name ?? account.login} onRecovered={onAvatarRecovered} />
         <div style={styles.who}>
           <div style={styles.nameRow}>
             <span style={styles.name}>{title}</span>
@@ -844,6 +866,7 @@ function CopilotSection({ t = (key) => DICTS.en[key] ?? key }) {
             onLogout={() => logout(account.id)}
             onUpdateAuth={() => updateAuth(account)}
             onManagePlan={() => managePlan(account)}
+            onAvatarRecovered={refreshAccounts}
           />
         ))
       )}
@@ -968,21 +991,22 @@ async function openCopilotSettings() {
 // 账号头像：风格对齐 DSH AccountAvatar（圆形成片、object-fit:cover、
 // referrerPolicy=no-referrer、加载失败兜底）。弹窗身份行与账号切换列表共用，
 // 保证两处头像尺寸/兜底完全一致。
-function AccountAvatar({ url, login, size = 18 }) {
-  const [failed, setFailed] = useState(false);
+function AccountAvatar({ id, url, login, size = 18, onRecovered }) {
+  const image = useAvatarRecovery(id, url, onRecovered);
   const box = {
     width: size, height: size, borderRadius: "50%", flex: "none",
     display: "inline-flex", alignItems: "center", justifyContent: "center",
     overflow: "hidden", background: "#adb5bd",
   };
-  if (url && !failed) {
+  if (image.source && !image.failed) {
     return (
       <span style={box}>
         <img
-          src={url}
+          key={image.revision}
+          src={image.source}
           alt=""
           referrerPolicy="no-referrer"
-          onError={() => setFailed(true)}
+          onError={image.onError}
           style={{ width: "100%", height: "100%", objectFit: "cover", display: "block", borderRadius: "50%" }}
         />
       </span>
@@ -1145,7 +1169,7 @@ function CopilotBadge({ t = (k) => DICTS.en[k] ?? k }) {
               borderTop: whoami.usagePercent !== null && whoami.usagePercent !== undefined
                 ? "none" : "1px solid rgba(128,128,128,0.15)",
             }}>
-              <AccountAvatar url={whoami.avatarUrl} login={whoami.login} size={18} />
+              <AccountAvatar id={whoami.id} url={whoami.avatarUrl} login={whoami.login} size={18} onRecovered={refresh} />
               <span style={{
                 fontSize: 13, flex: "1 1 auto", minWidth: 0, overflow: "hidden",
                 textOverflow: "ellipsis", whiteSpace: "nowrap",
@@ -1171,7 +1195,7 @@ function CopilotBadge({ t = (k) => DICTS.en[k] ?? k }) {
                       disabled={active || switching !== null}
                       onClick={() => switchAccount(acc.id)}
                     >
-                      <AccountAvatar url={acc.avatarUrl} login={acc.login} size={18} />
+                      <AccountAvatar id={acc.id} url={acc.avatarUrl} login={acc.login} size={18} onRecovered={refresh} />
                       <span title={label} style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                         {label}
                       </span>

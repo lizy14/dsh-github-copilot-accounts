@@ -473,6 +473,54 @@ export function apply(ctx) {
   const register = (route) => ctx.effect(() => ctx.webServer.register(route));
   let attempt = emptyState();
   let lastSyncError;
+  // 资料缓存时间是刷新策略，不是对 GHE 头像 URL 签名有效期的假设。
+  const PROFILE_TTL_MS = 5 * 60 * 1000;
+  const PROFILE_FAILURE_TTL_MS = 60 * 1000;
+  const PROFILE_RETRY_COOLDOWN_MS = 30 * 1000;
+  const profileCache = new Map(); // 槽位 key → grant 绑定的尝试/并发状态
+  const slotProfile = async (slot, { force = false } = {}) => {
+    const cached = profileCache.get(slot.key);
+    if (cached !== undefined && sameGrant(cached.grant, slot.payload)) {
+      if (cached.pending !== undefined) return cached.pending;
+      const ttl = force ? PROFILE_RETRY_COOLDOWN_MS
+        : cached.ok ? PROFILE_TTL_MS : PROFILE_FAILURE_TTL_MS;
+      if (Date.now() - cached.at < ttl) return { slot, error: cached.error, code: cached.code };
+    }
+    const entry = { grant: slot.payload, at: Date.now(), ok: false };
+    profileCache.set(slot.key, entry);
+    entry.pending = (async () => {
+      try {
+        const domain = accountDomain(slot.payload);
+        const who = await fetchIdentity(domain, slot.payload.refresh);
+        let next;
+        // 只修改 account 元数据，不触碰授权字段；迟到请求不能重建已删槽位，
+        // 或覆盖重新授权后的身份/头像。旧格式与 recovered 槽位 id 保持不变。
+        await ctx.credentials.modifyRecord(slot.key, (current) => {
+          if (profileCache.get(slot.key) !== entry
+            || !isGrant(current) || !sameGrant(current.payload, slot.payload)) return undefined;
+          const payload = { ...current.payload, account: { ...current.payload.account, ...who, domain } };
+          next = { key: slot.key, payload };
+          return { kind: "grant", payload };
+        });
+        if (next === undefined) {
+          entry.error = "account changed during profile refresh";
+          entry.code = 409;
+          return { slot, error: entry.error, code: entry.code };
+        }
+        entry.ok = true;
+        return { slot: next };
+      } catch {
+        // 不透传网络异常/URL，更不暴露凭据。失败保留旧资料及登录状态。
+        entry.error = "profile refresh failed";
+        entry.code = 502;
+        return { slot, error: entry.error, code: entry.code };
+      } finally {
+        entry.at = Date.now();
+        entry.pending = undefined;
+      }
+    })();
+    return entry.pending;
+  };
   const usageCache = new Map(); // 槽位 key → { at, grant, value }
   const slotUsage = async (slot) => {
     const cached = usageCache.get(slot.key);
@@ -500,6 +548,7 @@ export function apply(ctx) {
       if (isGrant(record) && typeof record.payload.refresh === "string") {
         const key = await ensureSlot(ctx, record.payload);
         usageCache.delete(key); // 重新授权后不沿用旧 grant 的套餐/用量缓存。
+        profileCache.delete(key); // 同 grant 重新登录也应重新获取资料/头像 URL。
       }
     } catch (err) {
       ctx.logger?.warn?.("copilot-auth: account slot persist failed: %s", String(err?.message ?? err));
@@ -675,10 +724,10 @@ export function apply(ctx) {
         mainPayload = undefined;
       }
       const accounts = await Promise.all(slots.map(async (slot) => {
-        const meta = slot.payload.account !== null && typeof slot.payload.account === "object"
-          ? slot.payload.account
+        const [profile, usage] = await Promise.all([slotProfile(slot), slotUsage(slot)]);
+        const meta = profile.slot.payload.account !== null && typeof profile.slot.payload.account === "object"
+          ? profile.slot.payload.account
           : {};
-        const usage = await slotUsage(slot);
         return {
           id: slot.key,
           login: typeof meta.login === "string" ? meta.login : undefined,
@@ -696,6 +745,27 @@ export function apply(ctx) {
         Number(b.active) - Number(a.active) || String(a.login ?? "").localeCompare(String(b.login ?? ""))
         || a.domain.localeCompare(b.domain) || a.id.localeCompare(b.id));
       json(res, 200, { accounts, signingIn: attempt.status === "running", syncError: lastSyncError });
+    },
+  });
+
+  // 图片加载失败时按 id 请求一次新资料；没有 URL 参数，不能变成头像/认证代理。
+  register({
+    kind: "exact",
+    path: r.profile,
+    handler: async (req, res) => {
+      if (!guard(req, res, "POST")) return;
+      let body;
+      try { body = await readJsonBody(req); }
+      catch { json(res, 400, { ok: false, error: "invalid JSON body" }); return; }
+      if (typeof body?.id !== "string" || body.id === "") { json(res, 400, { ok: false, error: "account id required" }); return; }
+      try {
+        const { slot } = selectSlot(await listAccountSlots(ctx), { id: body.id });
+        if (slot === undefined) { json(res, 404, { ok: false, error: "no such account" }); return; }
+        const result = await slotProfile(slot, { force: true });
+        if (result.error !== undefined) { json(res, result.code, { ok: false, error: result.error }); return; }
+        const avatarUrl = result.slot.payload.account?.avatarUrl;
+        json(res, 200, { ok: true, ...(typeof avatarUrl === "string" ? { avatarUrl } : {}) });
+      } catch { json(res, 500, { ok: false, error: "profile refresh failed" }); }
     },
   });
 
@@ -782,6 +852,7 @@ export function apply(ctx) {
           }
           await ctx.credentials.deleteRecord(slotKey);
           usageCache.delete(slotKey);
+          profileCache.delete(slotKey);
         } else if (mainPayload !== undefined) {
           // v0.1.0 升级前遗留主凭据且无槽位：直接清主 key。
           await ctx.credentials.deleteRecord(CREDENTIAL_KEY);
@@ -871,18 +942,19 @@ export function apply(ctx) {
         // + 用量。cache miss 或过期时主动调 loadUsage 一次（5 分钟内不重试，
         // 失败也写 cache 避免频繁打网络）。summarizeUsage 返回
         // { plan, usage: { percentUsed, resets, ... } } 或 { error }。
-        let login = null, avatarUrl = null;
+        let id = null, login = null, avatarUrl = null;
         let plan = null, usagePercent = null, usageResetDate = null;
         try {
           const slots = await listAccountSlots(ctx);
           const match = slots.find((s) => sameGrant(s.payload, p));
           if (match) {
-            const meta = match.payload.account
-              && typeof match.payload.account === "object"
-              ? match.payload.account : {};
+            id = match.key;
+            const [profile, u] = await Promise.all([slotProfile(match), slotUsage(match)]);
+            const meta = profile.slot.payload.account
+              && typeof profile.slot.payload.account === "object"
+              ? profile.slot.payload.account : {};
             login = typeof meta.login === "string" ? meta.login : null;
             avatarUrl = typeof meta.avatarUrl === "string" ? meta.avatarUrl : null;
-            const u = await slotUsage(match);
             if (u && u.error === undefined) {
               plan = u.plan ?? null;
               const usage = u.usage;
@@ -899,6 +971,7 @@ export function apply(ctx) {
 
         json(res, 200, {
           configured: true,
+          id,
           login,
           avatarUrl,
           plan,

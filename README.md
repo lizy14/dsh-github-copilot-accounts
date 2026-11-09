@@ -78,11 +78,13 @@ dsh plugin add /path/to/dsh-github-copilot-accounts
 ## 工作原理
 
 - 通过 `cordis.patch.yml` 生效：
-  1. 注册本插件（host 侧在 webserver 上开 6 条本地路由：`/copilot-auth/start|state|accounts|activate|logout|cancel`，跨站 Origin 拒绝）
+  1. 注册本插件（host 侧提供 `/copilot-auth` 本地登录、账号、资料与用量接口，跨站 Origin 拒绝）
   2. 以 settings base 层预置 `github-copilot` 路由（用户 `settings.yaml` 可逐字段覆盖）
 - 登录走 GitHub 设备码流（ghe.com 账号通过 pi-ai 的 Enterprise 域名提问进入对应端点）；**当前激活账号**的凭据存 `~/.dsh/.credentials.yaml`（强制 600 权限）的 `llm-pi-ai/github-copilot` 记录——pi-ai 的请求路径只读它并在请求中自动刷新；插件在同一凭据库的 `copilot-auth` scope 中维护各账号槽位，新槽位按归一化的域名与用户名隔离；「设为默认」= 把槽位 payload 原子写入主记录
 - `/copilot-auth/accounts` 为每个账号返回 `id`（实际凭据槽位 key，不含 token 的不透明标识）；前端仅将它用于列表/菜单定位与 `activate`、`logout` 的 `{id}` 请求，用户名仅用于显示，不从用户名或域名自行拼装 id。旧客户端的 `{login}` 请求仅在用户名唯一匹配时兼容；多个域名下有同名账号时返回 `409`，客户端应重新读取账号列表并使用对应 `id`
-- 账号身份（login/头像）取自 `api.<域名>/user`，套餐与用量取自 `copilot_internal/user`（access 过期或 401 先用长期 refresh token 刷新一次，结果回写槽位；结果缓存 5 分钟）
+- 账号身份（login/姓名/头像）取自 `api.<域名>/user`。`accounts` / `whoami` 查询按 5 分钟资料 TTL 刷新并合并同账号的并发请求，失败后缓存 1 分钟并保留原资料；该 TTL 是客户端策略，不代表头像签名有效期。刷新仅更新槽位的 `account` 元数据，不改主授权或 token 字段
+- **头像加载恢复**：GHE 自定义头像可能返回带签名的完整 URL，前端原样加载，不提取签名或附带 OAuth token。图片失败时通过 `POST /copilot-auth/profile {id}` 请求新资料并仅重试一次（强制刷新有 30 秒冷却）；URL / 账号改变时重置失败状态。接口不接收任意 URL，不代理图片；重复失败保留首字母圆标，不无限重试
+- 套餐与用量取自 `copilot_internal/user`，直接使用长期 refresh token 认证，结果按 grant 绑定缓存 5 分钟；Copilot 短期 token 刷新独立进行
 - **模型目录兜底填充**：登录成功/切换账号时，取「凭据缓存的账号可用模型 ∩ pi-ai 内置目录」写入该路由的模型目录——仅当该路由尚未配置 `models` 且无 `modelOverrides` 时写入；目录已存在（含空列表）一律让路，插件启动/重启也绝不触碰用户 settings。同步失败经 `/copilot-auth/accounts` 的 `syncError` 字段暴露
 - **存储兼容**：已有 `copilot-auth/account-<login>` 与 `recovered-*` 槽位保留原 key，不要求迁移或重新登录；同一归一化域名与用户名重新授权会复用已有槽位及其 id。v0.1.0 单账号升级时，首次打开账号页或再次登录会将旧主凭据自动快照为槽位。旧版本已经因跨域同名覆盖而丢失的授权无法凭空恢复，需要重新添加该账号
 
@@ -92,7 +94,7 @@ dsh plugin add /path/to/dsh-github-copilot-accounts
 - **ghe.com 用量端点未实测**（实测账号为 github.com 组织账号）：企业账号的 `copilot_internal/user` 按 pi-ai token 端点同构推导为 `api.<域名>`；不可用时仅该卡显示「用量不可用」，登录/切换主流程不受影响
 - 用量进度条依赖 `copilot_internal/user` 的响应字段（`copilot_plan` / `quota_snapshots.premium_interactions`），字段缺失或上游改名时对应元素自动隐藏
 - 登录进行中不能并发发起第二次登录（409）
-- 头像为 GitHub 外链，若桌面壳 CSP 拦截则回落为首字母圆标
+- 头像仍为 GitHub 外链；资料刷新与单次重试不能绕过桌面壳 CSP、网络或服务器拒绝访问，持续失败时回落为首字母圆标。不能仅凭图片响应的缓存时间判断 GHE 签名 URL 何时失效
 - Models 页的凭据状态圆点只反映 API Key 引用，OAuth 登录成功后圆点仍可能显示未配置（外观问题，功能不受影响）
 - 自行在 `cordis.patch.yml` patch `llm-pi-ai` 整段 config 会覆盖预置路由
 - `settings.yaml` 的 `llm-pi-ai:` 节只能稀疏覆盖字段，无法删除预置路由本身（移除须卸载本插件）
@@ -113,8 +115,9 @@ npm pack --dry-run
 | 路径 | 职责 |
 |---|---|
 | `cordis.patch.yml` | patch（本插件 entry / 预置路由） |
-| `src/host.mjs` · `src/shared.mjs` | host 半区：多账号登录状态机、6 条本地路由、槽位/激活/用量、模型目录兜底填充 |
+| `src/host.mjs` · `src/shared.mjs` | host 半区：登录状态机、本地账号/资料/用量接口、槽位/激活、模型目录兜底填充 |
 | `src/client.jsx` | client 半区：Accounts 设置页（卡片/下拉/进度条）+ 双语文案 |
+| `src/avatar-recovery.mjs` | client 单次头像恢复状态机与同账号请求去重（编入客户端产物） |
 | `scripts/build-client.mjs` | client 打包（`__ModuleLoader__` CJS 工厂信封） |
 | `lib/client.js` | 构建产物（入库，使 git 安装免构建） |
 

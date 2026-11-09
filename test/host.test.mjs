@@ -84,7 +84,7 @@ function makeCtx(t, script = {}) {
   const realFetch = globalThis.fetch;
   globalThis.fetch = async (url, init) => {
     ctx.fetchCalls.push({ url, init });
-    if (ctx.script.fetchImpl) return ctx.script.fetchImpl(url, ctx.fetchCalls.length);
+    if (ctx.script.fetchImpl) return ctx.script.fetchImpl(url, ctx.fetchCalls.length, init);
     return { ok: false, status: 500, statusText: "mock down", json: async () => ({}) };
   };
   t.after(() => { globalThis.fetch = realFetch; });
@@ -124,7 +124,7 @@ test("插件身份与路由注册", (t) => {
   assert.ok(ctx.routes.every((r) => r.kind === "exact"), "所有路由必须都是 exact");
   assert.deepEqual(ctx.routes.map((r) => r.path).sort(),
     ["/copilot-auth/accounts", "/copilot-auth/activate", "/copilot-auth/cancel", "/copilot-auth/debug",
-      "/copilot-auth/logout", "/copilot-auth/open", "/copilot-auth/refresh", "/copilot-auth/start",
+      "/copilot-auth/logout", "/copilot-auth/open", "/copilot-auth/profile", "/copilot-auth/refresh", "/copilot-auth/start",
       "/copilot-auth/state", "/copilot-auth/whoami"]);
 });
 
@@ -570,7 +570,10 @@ test("身份获取失败的 recovered 账号可按 id 切换注销，不与真�
   delete old.payload.account;
   const recovered = "copilot-auth/account-recovered-1";
   const ctx = makeCtx(t, { records: { [recovered]: old }, writtenOnAuthorized: grant("github.com", "rb", "recovered-1").payload,
-    fetchImpl: (url) => url.endsWith("/user") && !url.includes("copilot_internal") ? identityResponse("recovered-1") : usageResponse() });
+    fetchImpl: (url) => {
+      if (url === "https://api.company-a.ghe.com/user") return { ok: false, status: 500, statusText: "mock identity down" };
+      return url.endsWith("/user") && !url.includes("copilot_internal") ? identityResponse("recovered-1") : usageResponse();
+    } });
   await call(handler(ctx, "/start"), { method: "POST", body: { kind: "github.com" } });
   await sleep();
   const accounts = (await call(handler(ctx, "/accounts"))).body.accounts;
@@ -625,7 +628,8 @@ test("新格式 key 与合法旧用户名碰撞时保留旧账号并分配空闲
   const legacyLogin = base.slice("copilot-auth/account-".length);
   const old = grant("github.com", "old", legacyLogin);
   const ctx = makeCtx(t, { records: { [MAIN]: old, [base]: old }, writtenOnAuthorized: grant("github.com", "new", "a").payload,
-    fetchImpl: (url) => url.endsWith("/user") && !url.includes("copilot_internal") ? identityResponse("a") : usageResponse() });
+    fetchImpl: (url, count, init) => url.endsWith("/user") && !url.includes("copilot_internal")
+      ? identityResponse(init.headers.authorization === "Bearer old" ? legacyLogin : "a") : usageResponse() });
   await call(handler(ctx, "/start"), { method: "POST", body: { kind: "github.com" } });
   await sleep();
   assert.equal(ctx.credentials.records.get(base).payload.refresh, "old");
@@ -689,6 +693,250 @@ test("旧用量请求晚于重新授权返回时，列表和徽章不复用旧 g
   assert.equal((await call(handler(ctx, "/accounts"))).body.accounts[0].plan, "Copilot Enterprise");
   assert.equal((await call(handler(ctx, "/whoami"))).body.plan, "Copilot Enterprise");
   assert.equal(ctx.fetchCalls.filter((c) => c.url.includes("copilot_internal/user")).length, 3);
+});
+
+const profileResponse = (avatarUrl, login = "alice", name = "Alice") => ({
+  ok: true, status: 200, json: async () => ({ login, name, avatar_url: avatarUrl }),
+});
+const identityCalls = (ctx) => ctx.fetchCalls.filter((c) => new URL(c.url).pathname === "/user");
+const postProfile = (ctx, id) => call(handler(ctx, "/profile"), { method: "POST", body: { id } });
+
+test("账号列表按 TTL 刷新头像，whoami 共享资料且不修改 grant", async (t) => {
+  let now = 2_000_000_000_000;
+  t.mock.method(Date, "now", () => now);
+  const domain = "company-a.ghe.com", id = accountKey("alice", domain);
+  const original = grant(domain, "ra");
+  original.payload.availableModelIds = ["gpt-5.4"];
+  original.payload.account.avatarUrl = "https://company-a.ghe.com/avatars/u/42?fixture=old";
+  const before = structuredClone(original);
+  let avatar = "https://company-a.ghe.com/avatars/u/42?fixture=new";
+  const ctx = makeCtx(t, { records: { [MAIN]: original, [id]: original }, fetchImpl: (url) =>
+    new URL(url).pathname === "/user" ? profileResponse(avatar) : usageResponse() });
+  let list = (await call(handler(ctx, "/accounts"))).body.accounts;
+  assert.equal(list[0].avatarUrl, avatar);
+  assert.equal(list[0].id, id);
+  assert.equal((await call(handler(ctx, "/whoami"))).body.avatarUrl, avatar);
+  assert.equal((await call(handler(ctx, "/whoami"))).body.id, id);
+  assert.equal(identityCalls(ctx).length, 1);
+  assert.deepEqual(ctx.credentials.records.get(MAIN), before, "资料刷新不写主授权");
+  const saved = ctx.credentials.records.get(id).payload;
+  assert.equal(saved.refresh, before.payload.refresh);
+  assert.equal(saved.access, before.payload.access);
+  assert.deepEqual(saved.availableModelIds, before.payload.availableModelIds);
+  const [request] = identityCalls(ctx);
+  assert.equal(request.url, "https://api.company-a.ghe.com/user");
+  assert.equal(request.init.headers.authorization, "Bearer ra");
+  assert.ok(!ctx.fetchCalls.some((c) => new URL(c.url).pathname.includes("avatars")), "后端不请求头像 URL");
+  now += 5 * 60 * 1000 - 1;
+  await call(handler(ctx, "/accounts"));
+  assert.equal(identityCalls(ctx).length, 1);
+  avatar = "https://company-a.ghe.com/avatars/u/42?fixture=next";
+  now += 1;
+  list = (await call(handler(ctx, "/accounts"))).body.accounts;
+  assert.equal(list[0].avatarUrl, avatar);
+  assert.equal(identityCalls(ctx).length, 2);
+});
+
+test("whoami 独立刷新身份；同名跨域资料与限频互不混淆", async (t) => {
+  const a = grant("company-a.ghe.com", "ra"), b = grant("company-b.ghe.com", "rb");
+  const idA = accountKey("alice", "company-a.ghe.com"), idB = accountKey("alice", "company-b.ghe.com");
+  const ctx = makeCtx(t, { records: { [MAIN]: b, [idA]: a, [idB]: b }, fetchImpl: (url) =>
+    new URL(url).pathname === "/user" ? profileResponse(`https://${new URL(url).hostname}/avatar.png`) : usageResponse() });
+  const badge = (await call(handler(ctx, "/whoami"))).body;
+  assert.equal(badge.id, idB);
+  assert.equal(badge.avatarUrl, "https://api.company-b.ghe.com/avatar.png");
+  const profile = await postProfile(ctx, idA);
+  assert.equal(profile.code, 200);
+  assert.equal(profile.body.avatarUrl, "https://api.company-a.ghe.com/avatar.png");
+  assert.equal(identityCalls(ctx).length, 2);
+  assert.equal(ctx.credentials.records.get(MAIN).payload.refresh, "rb");
+});
+
+test("图片失败强制刷新有 30 秒冷却，不把普通五分钟 TTL 当作签名寿命", async (t) => {
+  let now = 2_000_000_000_000, revision = 0;
+  t.mock.method(Date, "now", () => now);
+  const domain = "company-a.ghe.com", id = accountKey("alice", domain);
+  const ctx = makeCtx(t, { records: { [id]: grant(domain, "ra") }, fetchImpl: (url) =>
+    new URL(url).pathname === "/user" ? profileResponse(`https://company-a.ghe.com/avatar-${++revision}.jpg`) : usageResponse() });
+  const first = await postProfile(ctx, id);
+  assert.equal(first.code, 200);
+  assert.deepEqual((await postProfile(ctx, id)).body, first.body);
+  assert.equal(identityCalls(ctx).length, 1);
+  now += 29_999;
+  await postProfile(ctx, id);
+  assert.equal(identityCalls(ctx).length, 1);
+  now += 1;
+  const next = await postProfile(ctx, id);
+  assert.equal(next.body.avatarUrl, "https://company-a.ghe.com/avatar-2.jpg");
+  await call(handler(ctx, "/accounts"));
+  assert.equal(identityCalls(ctx).length, 2);
+});
+
+test("资料更新失败保留旧头像和登录，失败缓存限频并隐藏网络异常详情", async (t) => {
+  let now = 2_000_000_000_000, down = true;
+  t.mock.method(Date, "now", () => now);
+  const domain = "company-a.ghe.com", id = accountKey("alice", domain);
+  const original = grant(domain, "ra");
+  original.payload.account.avatarUrl = "https://company-a.ghe.com/old.jpg";
+  const ctx = makeCtx(t, { records: { [MAIN]: original, [id]: original }, fetchImpl: (url) => {
+    if (new URL(url).pathname !== "/user") return usageResponse();
+    if (down) throw new Error("sensitive diagnostic must not escape");
+    return profileResponse("https://company-a.ghe.com/new.jpg");
+  } });
+  const list = (await call(handler(ctx, "/accounts"))).body.accounts;
+  assert.equal(list[0].avatarUrl, original.payload.account.avatarUrl);
+  assert.equal(list[0].active, true);
+  assert.equal((await postProfile(ctx, id)).code, 502);
+  assert.deepEqual((await postProfile(ctx, id)).body, { ok: false, error: "profile refresh failed" });
+  assert.equal((await call(handler(ctx, "/whoami"))).body.configured, true);
+  assert.equal(identityCalls(ctx).length, 1);
+  now += 59_999;
+  await call(handler(ctx, "/accounts"));
+  assert.equal(identityCalls(ctx).length, 1);
+  now += 1;
+  down = false;
+  assert.equal((await call(handler(ctx, "/accounts"))).body.accounts[0].avatarUrl, "https://company-a.ghe.com/new.jpg");
+  assert.equal(identityCalls(ctx).length, 2);
+  assert.ok(!JSON.stringify(ctx.logger.warns).includes("sensitive diagnostic"));
+  assert.equal(ctx.credentials.records.get(MAIN).payload.refresh, "ra");
+});
+
+test("资料刷新在 accounts、whoami 和图片恢复之间合并并发请求", async (t) => {
+  const domain = "company-a.ghe.com", id = accountKey("alice", domain);
+  const a = grant(domain, "ra");
+  let release, notify;
+  const started = new Promise((resolve) => { notify = resolve; });
+  const ctx = makeCtx(t, { records: { [MAIN]: a, [id]: a }, fetchImpl: (url) => {
+    if (new URL(url).pathname === "/user") return new Promise((resolve) => { release = resolve; notify(); });
+    return usageResponse();
+  } });
+  const first = call(handler(ctx, "/accounts"));
+  await started;
+  const others = [call(handler(ctx, "/whoami")), postProfile(ctx, id), postProfile(ctx, id)];
+  release(profileResponse("https://company-a.ghe.com/fresh.jpg"));
+  const results = await Promise.all([first, ...others]);
+  assert.equal(identityCalls(ctx).length, 1);
+  assert.equal(results[0].body.accounts[0].avatarUrl, "https://company-a.ghe.com/fresh.jpg");
+  for (const r of results.slice(1)) assert.equal(r.body.avatarUrl, "https://company-a.ghe.com/fresh.jpg");
+});
+
+test("profile 只接受已有槽位 id，拒绝跨站、错误方法和任意 URL", async (t) => {
+  const domain = "company-a.ghe.com", id = accountKey("alice", domain);
+  const a = grant(domain, "ra"), other = "other/account-alice";
+  const ctx = makeCtx(t, { records: { [MAIN]: a, [id]: a, [other]: a } });
+  assert.equal((await call(handler(ctx, "/profile"))).code, 405);
+  assert.equal((await call(handler(ctx, "/profile"), { method: "POST", headers: { origin: "https://outside.example" }, body: { id } })).code, 403);
+  for (const body of [{}, { login: "alice" }, { url: "https://outside.example/image" }, { id: "" }, { id: null }, { id: 42 }, "invalid JSON"]) {
+    assert.equal((await call(handler(ctx, "/profile"), { method: "POST", body })).code, 400);
+  }
+  for (const target of [MAIN, other, "copilot-auth/account-missing"]) {
+    assert.equal((await postProfile(ctx, target)).code, 404);
+  }
+  assert.equal(identityCalls(ctx).length, 0);
+  assert.equal(ctx.credentials.records.size, 3);
+});
+
+test("重新授权时旧资料请求不能覆盖新 grant 或新头像", async (t) => {
+  const domain = "company-a.ghe.com", id = accountKey("alice", domain);
+  const old = grant(domain, "old"), fresh = grant(domain, "new");
+  let release, notify;
+  const started = new Promise((resolve) => { notify = resolve; });
+  const ctx = makeCtx(t, { records: { [MAIN]: old, [id]: old }, fetchImpl: (url, count, init) => {
+    if (new URL(url).pathname !== "/user") return usageResponse();
+    if (init.headers.authorization === "Bearer old") return new Promise((resolve) => { release = resolve; notify(); });
+    return profileResponse("https://company-a.ghe.com/new.jpg");
+  } });
+  const pending = postProfile(ctx, id);
+  await started;
+  ctx.credentials.records.set(MAIN, fresh);
+  ctx.credentials.records.set(id, fresh);
+  assert.equal((await postProfile(ctx, id)).body.avatarUrl, "https://company-a.ghe.com/new.jpg");
+  release(profileResponse("https://company-a.ghe.com/old.jpg"));
+  assert.equal((await pending).code, 409);
+  assert.equal(ctx.credentials.records.get(id).payload.refresh, "new");
+  assert.equal(ctx.credentials.records.get(id).payload.account.avatarUrl, "https://company-a.ghe.com/new.jpg");
+  assert.equal((await postProfile(ctx, id)).body.avatarUrl, "https://company-a.ghe.com/new.jpg");
+  assert.equal(identityCalls(ctx).length, 2);
+});
+
+test("注销期间迟到的资料响应不能重建已删除槽位", async (t) => {
+  const domain = "company-a.ghe.com", id = accountKey("alice", domain);
+  const a = grant(domain, "ra");
+  let release, notify;
+  const started = new Promise((resolve) => { notify = resolve; });
+  const ctx = makeCtx(t, { records: { [MAIN]: a, [id]: a }, fetchImpl: (url) => {
+    if (new URL(url).pathname === "/user") return new Promise((resolve) => { release = resolve; notify(); });
+    return usageResponse();
+  } });
+  const pending = postProfile(ctx, id);
+  await started;
+  assert.equal((await call(handler(ctx, "/logout"), { method: "POST", body: { id } })).code, 200);
+  release(profileResponse("https://company-a.ghe.com/late.jpg"));
+  assert.equal((await pending).code, 409);
+  assert.equal(ctx.credentials.records.has(id), false);
+  assert.equal(ctx.credentials.records.has(MAIN), false);
+});
+
+test("资料回写保留并发 token 刷新字段，并回填 recovered 账号而不更改 id", async (t) => {
+  const id = "copilot-auth/account-recovered-1";
+  const a = grant("company-a.ghe.com", "ra");
+  delete a.payload.account;
+  let release, notify;
+  const started = new Promise((resolve) => { notify = resolve; });
+  const ctx = makeCtx(t, { records: { [id]: a }, fetchImpl: (url) => {
+    if (new URL(url).pathname === "/user") return new Promise((resolve) => { release = resolve; notify(); });
+    return usageResponse();
+  } });
+  const pending = postProfile(ctx, id);
+  await started;
+  ctx.credentials.records.set(id, { kind: "grant", payload: { ...a.payload, access: "fresh-access", expires: 123, availableModelIds: ["new-model"] } });
+  release(profileResponse("https://company-a.ghe.com/ready.jpg", "alice", "Alice Updated"));
+  assert.equal((await pending).code, 200);
+  const payload = ctx.credentials.records.get(id).payload;
+  assert.equal(payload.access, "fresh-access");
+  assert.equal(payload.expires, 123);
+  assert.deepEqual(payload.availableModelIds, ["new-model"]);
+  assert.equal(payload.account.login, "alice");
+  assert.equal(payload.account.name, "Alice Updated");
+  assert.equal(payload.account.domain, "company-a.ghe.com");
+  assert.deepEqual([...ctx.credentials.records.keys()], [id]);
+});
+
+test("同 grant 重新登录也使资料缓存失效，不要求重新授权才刷新头像", async (t) => {
+  const domain = "company-a.ghe.com", id = accountKey("alice", domain);
+  const a = grant(domain, "ra");
+  let avatar = "https://company-a.ghe.com/old.jpg";
+  const ctx = makeCtx(t, { records: { [MAIN]: a, [id]: a }, writtenOnAuthorized: a.payload,
+    fetchImpl: (url) => new URL(url).pathname === "/user" ? profileResponse(avatar) : usageResponse() });
+  await call(handler(ctx, "/accounts"));
+  assert.equal(identityCalls(ctx).length, 1);
+  avatar = "https://company-a.ghe.com/new.jpg";
+  await call(handler(ctx, "/start"), { method: "POST", body: { kind: "ghe.com", domain } });
+  await sleep();
+  assert.equal((await call(handler(ctx, "/accounts"))).body.accounts[0].avatarUrl, avatar);
+  assert.equal(identityCalls(ctx).length, 2);
+});
+
+test("同 grant 登录后旧资料请求的 generation 失效，不覆盖更新的头像", async (t) => {
+  const domain = "company-a.ghe.com", id = accountKey("alice", domain);
+  const a = grant(domain, "ra");
+  let release, notify, requests = 0;
+  const started = new Promise((resolve) => { notify = resolve; });
+  const ctx = makeCtx(t, { records: { [MAIN]: a, [id]: a }, writtenOnAuthorized: a.payload, fetchImpl: (url) => {
+    if (new URL(url).pathname !== "/user") return usageResponse();
+    if (++requests === 1) return new Promise((resolve) => { release = resolve; notify(); });
+    return profileResponse("https://company-a.ghe.com/new.jpg");
+  } });
+  const pending = postProfile(ctx, id);
+  await started;
+  await call(handler(ctx, "/start"), { method: "POST", body: { kind: "ghe.com", domain } });
+  await sleep();
+  assert.equal((await postProfile(ctx, id)).body.avatarUrl, "https://company-a.ghe.com/new.jpg");
+  release(profileResponse("https://company-a.ghe.com/old.jpg"));
+  assert.equal((await pending).code, 409);
+  assert.equal(ctx.credentials.records.get(id).payload.account.avatarUrl, "https://company-a.ghe.com/new.jpg");
+  assert.equal((await postProfile(ctx, id)).body.avatarUrl, "https://company-a.ghe.com/new.jpg");
+  assert.equal(identityCalls(ctx).length, 2);
 });
 
 test("跨站 Origin 拒绝 403，同源/无 Origin 放行", async (t) => {

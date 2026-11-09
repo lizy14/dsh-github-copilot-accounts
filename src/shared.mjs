@@ -14,6 +14,7 @@ export const routes = () => ({
   start: `${ROUTE_PREFIX}/start`,
   state: `${ROUTE_PREFIX}/state`,
   accounts: `${ROUTE_PREFIX}/accounts`,
+  profile: `${ROUTE_PREFIX}/profile`,
   activate: `${ROUTE_PREFIX}/activate`,
   logout: `${ROUTE_PREFIX}/logout`,
   cancel: `${ROUTE_PREFIX}/cancel`,
