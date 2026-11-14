@@ -203,7 +203,7 @@ async function fetchIdentity(domain, refreshToken) {
   return {
     login: data.login,
     name: typeof data.name === "string" && data.name !== "" ? data.name : data.login,
-    avatarUrl: typeof data.avatar_url === "string" ? data.avatar_url : undefined,
+    ...(typeof data.avatar_url === "string" ? { avatarUrl: data.avatar_url } : {}),
   };
 }
 
@@ -498,7 +498,9 @@ export function apply(ctx) {
         await ctx.credentials.modifyRecord(slot.key, (current) => {
           if (profileCache.get(slot.key) !== entry
             || !isGrant(current) || !sameGrant(current.payload, slot.payload)) return undefined;
-          const payload = { ...current.payload, account: { ...current.payload.account, ...who, domain } };
+          const account = { ...current.payload.account, ...who, domain };
+          if (who.avatarUrl === undefined) delete account.avatarUrl;
+          const payload = { ...current.payload, account };
           next = { key: slot.key, payload };
           return { kind: "grant", payload };
         });

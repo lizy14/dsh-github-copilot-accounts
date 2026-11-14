@@ -25,6 +25,8 @@ function makeStore(initial = {}) {
     async modifyRecord(k, mutate) {
       const next = await mutate(records.get(k));
       if (next === undefined) return records.get(k);
+      // The released credential store rejects undefined in JSON grant payloads.
+      assert.deepEqual(next, JSON.parse(JSON.stringify(next)), "credential records must be losslessly JSON serializable");
       records.set(k, next);
       return next;
     },
@@ -750,6 +752,20 @@ test("whoami 独立刷新身份；同名跨域资料与限频互不混淆", asyn
   assert.equal(profile.body.avatarUrl, "https://api.company-a.ghe.com/avatar.png");
   assert.equal(identityCalls(ctx).length, 2);
   assert.equal(ctx.credentials.records.get(MAIN).payload.refresh, "rb");
+});
+
+test("缺失可选头像仍可保存合法 JSON 资料并清除旧地址", async (t) => {
+  const domain = "company.ghe.com", id = accountKey("alice", domain);
+  const a = grant(domain, "FAKE_REFRESH"); a.payload.account.avatarUrl = "https://example.invalid/old";
+  const ctx = makeCtx(t, { records: { [MAIN]: a, [id]: a }, fetchImpl: () => ({ ok: true, json: async () => ({ login: "alice", name: "New display" }) }) });
+  const before = structuredClone(ctx.credentials.records.get(id).payload);
+  const response = await postProfile(ctx, id);
+  assert.equal(response.code, 200);
+  const after = ctx.credentials.records.get(id).payload;
+  assert.equal(Object.hasOwn(after.account, "avatarUrl"), false);
+  assert.equal(after.account.name, "New display");
+  assert.equal(after.refresh, before.refresh); assert.equal(after.access, before.access);
+  assert.equal(Object.hasOwn(response.body, "avatarUrl"), false);
 });
 
 test("图片失败强制刷新有 30 秒冷却，不把普通五分钟 TTL 当作签名寿命", async (t) => {

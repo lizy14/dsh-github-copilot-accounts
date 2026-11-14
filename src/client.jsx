@@ -1214,7 +1214,7 @@ function CopilotBadge({ t = (k) => DICTS.en[k] ?? k }) {
 
 export function apply(ctx) {
   console.log("[copilot-auth] client apply v3 (badge+label+settings-jump)");
-  ctx.locale.register("copilot-auth", DICTS);
+  ctx.effect(() => ctx.locale.register("copilot-auth", DICTS), "copilot accounts locale");
   const t = ctx.locale.bind("copilot-auth");
   // 注入徽标全局样式：跟 ui-chat 的 StatsPills pill 同款
   // （conversation.composer.dock slot 同源），字体/颜色/图标尺寸/hover 阴影
