@@ -7,6 +7,7 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { parse as parseYaml } from "yaml";
 import { installDefaultModelPolicy } from "../src/default-model.mjs";
+import { installSessionCompaction } from "../src/session-compaction.mjs";
 import { createSessionAccountFeature } from "../src/session-feature.mjs";
 import { createProfiledAccountAdapter } from "../src/account-profiled-adapter.mjs";
 import { accountRouteId, GLOBAL_COPILOT_ROUTE } from "../src/account-route-id.mjs";
@@ -16,14 +17,14 @@ const path = (value) => new URL(value, base);
 const present = ["@deepseek-ai/cordis/lib/index.js", "@deepseek-ai/cordis-plugin-loader/lib/index.js", "@deepseek-ai/cordis-plugin-include/lib/index.js", "@deepseek-ai/dsh-compaction-basic/lib/index.js", "@deepseek-ai/schemastery/lib/index.mjs"].every((value) => existsSync(path(value)));
 const load = (value) => import(path(value).href);
 const A = "copilot-auth/account-compose-a", B = "copilot-auth/account-compose-b", MAIN = "llm-pi-ai/github-copilot";
-const HOST = "dsh-github-copilot-accounts", DEFAULT = HOST + "/default-model";
+const HOST = "dsh-github-copilot-accounts", DEFAULT = HOST + "/default-model", COMPACTION = HOST + "/session-compaction";
 const NATIVE_DEFAULT = "@deepseek-ai/dsh-agent-default-model", NATIVE_CONTROLLER = "@deepseek-ai/dsh-api-session-controller", NATIVE_COMPACTION = "@deepseek-ai/dsh-compaction-basic", NATIVE_PI = "@deepseek-ai/dsh-llm-pi-ai";
 const deferred = () => { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; };
 const original = (value, symbol) => value?.[symbol] ?? value;
 const grant = (letter) => ({ kind: "grant", payload: { type: "oauth", refresh: "FAKE_COMPOSE_" + letter + "_REFRESH", access: "FAKE_COMPOSE_" + letter + "_ACCESS", expires: Date.now() + 3600000,
   enterpriseUrl: `compose-${letter.toLowerCase()}.ghe.com`, availableModelIds: ["gpt-5.4"], account: { login: "synthetic", domain: `compose-${letter.toLowerCase()}.ghe.com` } } });
 
-for (const order of ["native-first", "roles-first"]) test(`actual all-role cold composition ${order}: no cycle, one public engine, managed catalog ready`, { skip: present ? false : "optional complete extracted native fixture absent", timeout: 10000 }, async (t) => {
+for (const disabled of [false, true]) for (const order of ["native-first", "roles-first"]) test(`actual all-role cold composition ${order}, compaction disabled=${disabled}: Remote remains ready`, { skip: present ? false : "optional complete extracted native fixture absent", timeout: 10000 }, async (t) => {
   const previous = globalThis.fetch; globalThis.fetch = async () => assert.fail("Network forbidden in all-role composition proof");
   t.after(() => { globalThis.fetch = previous; });
   const [cordis, loaderModule, include, nativeDefault, basic, core, session, agent, projection, query, schema, protocol] = await Promise.all([
@@ -86,6 +87,9 @@ for (const order of ["native-first", "roles-first"]) test(`actual all-role cold 
       if (name === NATIVE_COMPACTION) return Promise.resolve({ default: NativeBasic });
       if (name === NATIVE_PI) return Promise.resolve({ apply() {} }); // Wire boundary only, not a second LLM.
       if (name === DEFAULT) return Promise.resolve({ apply(ctx) { state.defaultFiber = installDefaultModelPolicy(ctx, Context); } });
+      if (name === COMPACTION) return Promise.resolve({ inject: ["loader", "llm", "tokenMeter", "sessions", "credentials"], apply(ctx) {
+        state.compactionFiber = installSessionCompaction(ctx, { Context, BasicCompactionEngine: NativeBasic, interpolate: loaderModule.interpolate });
+      } });
       if (name === HOST) return Promise.resolve({ inject: ["webServer", "authorization", "credentials", "settings", "llm"], apply(ctx) {
         // Mirror the production Host's public optional injection/lifetime contract;
         // actual REST/webServer/auth workflow bodies are intentionally not started.
@@ -110,25 +114,39 @@ for (const order of ["native-first", "roles-first"]) test(`actual all-role cold 
   const loaderFiber = root.plugin(MemoryLoader); await loaderFiber.await(); assert.equal(loaderFiber.state, 2);
   const originalEntries = [
     { id: "agent-default-model", name: NATIVE_DEFAULT, config: { provider: "github-copilot", model: "gpt-5.4" } },
-    { id: "compaction-basic", name: NATIVE_COMPACTION, config: { auto: true, modelPolicies: [{ provider: "github-copilot", model: "gpt-5.4", headroomTokens: 1234, maxTokens: 456 }] } },
+    { id: "compaction-basic", name: NATIVE_COMPACTION, disabled, config: { auto: true, modelPolicies: [{ provider: "github-copilot", model: "gpt-5.4", headroomTokens: 1234, maxTokens: 456 }] } },
     { id: "session-controller", name: NATIVE_CONTROLLER }, { id: "llm-pi-ai", name: NATIVE_PI },
   ];
   const patch = parseYaml(await readFile(new URL("../cordis.patch.yml", import.meta.url), "utf8")), warnings = [];
   const composed = include.applyEntryPatches(originalEntries, patch, (...args) => warnings.push(args));
   assert.deepEqual(warnings, []);
-  const roles = composed.filter((entry) => [HOST, DEFAULT].includes(entry.name)), nativeEntries = composed.filter((entry) => ![HOST, DEFAULT].includes(entry.name));
+  const roles = composed.filter((entry) => [HOST, DEFAULT, COMPACTION].includes(entry.name)), nativeEntries = composed.filter((entry) => ![HOST, DEFAULT, COMPACTION].includes(entry.name));
   const entries = order === "native-first" ? [...nativeEntries, ...roles] : [...roles, ...nativeEntries];
-  assert.equal([HOST, DEFAULT].includes(entries[0].name), order === "roles-first");
+  assert.equal([HOST, DEFAULT, COMPACTION].includes(entries[0].name), order === "roles-first");
   await root.loader.root.update(entries); await root.loader.await();
-  await state.defaultFiber?.await();
+  await state.defaultFiber?.await(); await state.compactionFiber?.await();
   assert.equal(root.get("copilotDefaultModelPolicy")?.isControllerProtected(), true, "actual patched controller realm must match policy realms");
   const feature = await state.completed.promise; await state.featureFiber.await();
   assert.equal(state.featureFiber.state, 2); assert.equal(feature.status.phase, "ready", JSON.stringify({ status: feature.status, bound: state.boundServices, delegates: state.delegateBuilds ?? 0 }));
   assert.equal(root.get("copilotManagedDefault").isReady(), true); assert.equal(root.get("copilotManagedDefault").isAvailable(), true);
-  const nativeCompaction = root.loader.resolve("compaction-basic");
-  assert.equal(nativeCompaction.fiber.state, 2);
-  assert.equal(nativeCompaction.fiber.runtime.Config, NativeBasic.Config);
-  assert.deepEqual(nativeCompaction.options.config, originalEntries[1].config);  const controller = root.get("sessionController");
+  const nativeCompaction = root.loader.resolve("compaction-basic"), bridge = root.get("copilotSessionCompaction");
+  assert.equal(bridge?.isReady(), true);
+  assert.equal(bridge.mode, disabled ? "disabled" : "enabled");
+  assert.equal(Boolean(nativeCompaction.disabled), disabled);
+  assert.deepEqual(nativeCompaction.options.config, originalEntries[1].config);
+  if (disabled) {
+    assert.equal(root.get("compaction"), undefined, "disabled native compaction must stay disabled");
+  } else {
+    assert.equal(nativeCompaction.fiber.state, 2);
+    assert.equal(nativeCompaction.fiber.runtime.Config, NativeBasic.Config);
+    const backing = nativeCompaction.ctx.get("compaction"), publicEngine = root.get("compaction");
+    assert.notEqual(original(backing, cordis.symbols.original), original(publicEngine, cordis.symbols.original));
+    assert.equal(backing.config.auto, false); assert.equal(publicEngine.config.auto, true);
+    for (const provider of [GLOBAL_COPILOT_ROUTE, accountRouteId(A), accountRouteId(B)]) {
+      assert.equal(publicEngine.config.modelPolicies.find((item) => item.provider === provider && item.model === "gpt-5.4").headroomTokens, 1234);
+    }
+  }
+  const controller = root.get("sessionController");
   assert.equal(root.get("agentDefaultModel").currentSelection().provider, "github-copilot", "native public namespace remains untouched");
   assert.equal(controller.selectedDefault().provider, GLOBAL_COPILOT_ROUTE);
   assert.equal(root.get("llm").listProviders().some((value) => value.id === "github-copilot"), true);

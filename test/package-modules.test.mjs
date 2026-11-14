@@ -34,7 +34,7 @@ test("documented local Node script commands reference existing files", () => {
 });
 
 test("published entrypoints import without any running app or credential service", async () => {
-  for (const key of [".", "./default-model"]) {
+  for (const key of [".", "./default-model", "./session-compaction"]) {
     const target = manifest.exports[key];
     assert.equal(typeof target, "string");
     const module = await import(new URL("../" + target, import.meta.url));

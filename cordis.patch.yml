@@ -12,6 +12,18 @@
       isolate:
         agentDefaultModel: copilot-session-default-model
         llm: copilot-session-llm
+    - id: copilot-session-compaction
+      name: 'dsh-github-copilot-accounts/session-compaction'
+      isolate:
+        compaction: copilot-session-compaction-backing
+# Keep the native entry/configuration identity. A disabled native entry stays
+# disabled; the optional bridge does not gate the Session account Remote.
+- id: compaction-basic
+  name: '@deepseek-ai/dsh-compaction-basic'
+  isolate:
+    compaction: copilot-session-compaction-backing
+  inject:
+    - copilotCompactionControls
 # Only the Session controller sees policy/catalog facades. Original global
 # services, configuration entries and native protocol implementations stay intact.
 - id: session-controller

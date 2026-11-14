@@ -72,13 +72,13 @@ function makeCtx(t, script = {}) {
         ctx.settings.mutateCalls.push({ ns, ops });
         if (ctx.script.mutateError) throw new Error(ctx.script.mutateError);
       },
-      describe: () => [{ ns: "llm-pi-ai", revision: ctx.script.revision ?? 1, user: ctx.script.userLayer }],
+      describe: () => [{ ns: "llm-pi-ai", revision: ctx.script.revision ?? 1, value: ctx.script.configured ?? { providers: {} }, user: ctx.script.userLayer }],
     },
+    configEditor: { entries: () => [{ ctx: { get: (name) => name === "llm" ? ctx.llm : undefined }, options: { id: "llm-pi-ai", name: "@deepseek-ai/dsh-llm-pi-ai", config: ctx.script.configured ?? { providers: {} } } }] },
     llm: { listModels: async () => ctx.script.served ?? [] },
     logger: { warns: [], warn: (...a) => ctx.logger.warns.push(a) },
     script: { notices: [], served: undefined, userLayer: undefined, ...script },
   };
-  ctx.settings.get = () => ctx.script.configured;
   // fetch 桩：默认一律 500（mock down）——身份/用量失败走各自的降级路径。
   const realFetch = globalThis.fetch;
   globalThis.fetch = async (url, init) => {
@@ -119,7 +119,7 @@ const usageResponse = (plan = "enterprise", percentRemaining = 34) => ({
 test("插件身份与路由注册", (t) => {
   const ctx = makeCtx(t);
   assert.equal(plugin.name, "copilot-auth");
-  assert.deepEqual(plugin.inject, ["webServer", "authorization", "credentials", "settings", "llm"]);
+  assert.deepEqual(plugin.inject, ["webServer", "authorization", "credentials", "settings", "llm", "configEditor"]);
   assert.ok(ctx.routes.every((r) => r.kind === "exact"), "所有路由必须都是 exact");
   assert.deepEqual(ctx.routes.map((r) => r.path).sort(),
     ["/copilot-auth/accounts", "/copilot-auth/activate", "/copilot-auth/cancel", "/copilot-auth/debug",
@@ -139,12 +139,28 @@ test("卸载清理全部路由和计时器，同一 webServer 可重新挂载", 
 });
 
 test("部分挂载失败后卸载不遗留已注册路由，也不删除其它插件路由", (t) => {
+  const clear = t.mock.method(globalThis, "clearTimeout");
   const ctx = makeCtx(t);
   ctx.dispose();
   const external = { kind: "exact", path: "/copilot-auth/activate", handler: () => {} };
   ctx.webServer.register(external);
   assert.throws(() => plugin.apply(ctx), /duplicate exact route/);
   ctx.dispose();
+  assert.deepEqual(ctx.routes, [external]);
+  assert.equal(clear.mock.callCount(), 2, "both the complete and failed mount release their refresh timer");
+});
+
+test("部分挂载异常后 active refresh timers 归零，不仅仅移除路由", (t) => {
+  const active = new Set();
+  t.mock.method(globalThis, "setTimeout", () => { const timer = { unref() {} }; active.add(timer); return timer; });
+  t.mock.method(globalThis, "clearTimeout", (timer) => { active.delete(timer); });
+  const ctx = makeCtx(t);
+  assert.equal(active.size, 1); ctx.dispose(); assert.equal(active.size, 0);
+  const external = { kind: "exact", path: "/copilot-auth/activate", handler() {} };
+  ctx.webServer.register(external);
+  assert.throws(() => plugin.apply(ctx), /duplicate exact route/);
+  assert.equal(active.size, 1);
+  ctx.dispose(); assert.equal(active.size, 0);
   assert.deepEqual(ctx.routes, [external]);
 });
 

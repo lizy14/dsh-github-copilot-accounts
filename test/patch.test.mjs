@@ -26,10 +26,20 @@ test("会话策略使用两个消费者隔离域，不替换原始全局服务�
   assert.ok(!insert.some((row) => row.name === "@deepseek-ai/dsh-agent-default-model"));
 });
 
-test("会话账号路由不覆盖原生压缩角色", () => {
+test("conditional compaction keeps native config and never forces user-disabled compaction on", () => {
   const insert = doc.flatMap((row) => row.insert ?? []);
-  assert.ok(!doc.some((row) => row.id === "compaction-basic"));
-  assert.ok(!insert.some((row) => row.id === "copilot-session-compaction"));
+  const native = doc.find((row) => row.id === "compaction-basic");
+  const bridge = insert.find((row) => row.id === "copilot-session-compaction");
+  assert.equal(native.name, "@deepseek-ai/dsh-compaction-basic");
+  assert.equal(native.disabled, undefined);
+  assert.equal(native.config, undefined);
+  assert.equal(native.isolate.compaction, "copilot-session-compaction-backing");
+  assert.ok(native.inject.includes("copilotCompactionControls"));
+  assert.equal(bridge.name, "dsh-github-copilot-accounts/session-compaction");
+  const host = readFileSync(new URL("../src/host.mjs", import.meta.url), "utf8");
+  const optional = host.match(/ctx\.inject\((\["loader", "sessionController"[^\]]*\]), async \(child\)/);
+  assert.ok(optional);
+  assert.ok(!JSON.parse(optional[1]).includes("copilotSessionCompaction"), "optional compaction must not hide the Session Remote");
 });
 
 test("策略子模块与完整 Host 模块会随 sideload 包分发，版本约束与锁文件一致", () => {

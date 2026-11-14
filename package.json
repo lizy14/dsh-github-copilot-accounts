@@ -14,6 +14,7 @@
     ".": "./src/host.mjs",
     "./client": "./lib/client.js",
     "./default-model": "./src/default-model.mjs",
+    "./session-compaction": "./src/session-compaction.mjs",
     "./package.json": "./package.json"
   },
   "files": [
