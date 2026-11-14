@@ -1,6 +1,5 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import childProcess from "node:child_process";
 import plugin from "../src/host.mjs";
 import { accountKey, apiBase } from "../src/shared.mjs";
 
@@ -124,7 +123,7 @@ test("插件身份与路由注册", (t) => {
   assert.ok(ctx.routes.every((r) => r.kind === "exact"), "所有路由必须都是 exact");
   assert.deepEqual(ctx.routes.map((r) => r.path).sort(),
     ["/copilot-auth/accounts", "/copilot-auth/activate", "/copilot-auth/cancel", "/copilot-auth/debug",
-      "/copilot-auth/logout", "/copilot-auth/models", "/copilot-auth/open", "/copilot-auth/profile", "/copilot-auth/refresh", "/copilot-auth/start",
+      "/copilot-auth/logout", "/copilot-auth/open", "/copilot-auth/profile", "/copilot-auth/refresh", "/copilot-auth/start",
       "/copilot-auth/state", "/copilot-auth/whoami"]);
 });
 
@@ -1024,16 +1023,6 @@ test("未知凭据和网络异常不进入日志或账号 API 响应", async (t)
   assert.ok(!JSON.stringify(identity.body).includes(marker));
 });
 
-test("手动模型刷新仅接受账号槽位且未挂载会话功能时安全拒绝", async (t) => {
-  const id = "copilot-auth/account-alice", a = grant("github.com", "ra");
-  const ctx = makeCtx(t, { records: { [MAIN]: a, [id]: a } });
-  assert.equal((await call(handler(ctx, "/models"), { method: "POST", body: {} })).code, 400);
-  assert.equal((await call(handler(ctx, "/models"), { method: "POST", body: { id: "copilot-auth/account-missing" } })).code, 404);
-  const unavailable = await call(handler(ctx, "/models"), { method: "POST", body: { id } });
-  assert.equal(unavailable.code, 503);
-  assert.equal(unavailable.body.error, "model refresh unavailable");
-  assert.equal(ctx.fetchCalls.length, 0, "unavailable feature must not make a model request");
-});
 
 test("外部链接接口在 OS 调用前拒绝注入、非 GitHub 及错误方法", async (t) => {
   const ctx = makeCtx(t);
@@ -1063,39 +1052,4 @@ test("GHE 登录与凭据 API 拒绝非 GitHub 域名", async (t) => {
   await call(handler(ctx, "/accounts"));
   await call(handler(ctx, "/refresh"), { method: "POST" });
   assert.equal(ctx.fetchCalls.length, 0, "异常凭据不得把 token 发往非 GitHub 主机");
-});
-
-test("open 拒绝不可信 URL，合法链接以独立参数启动且不经过 shell", async (t) => {
-  const ctx = makeCtx(t);
-  const launches = [];
-  t.mock.method(childProcess, "execFile", (command, args, options, callback) => {
-    launches.push({ command, args, options });
-    callback(null);
-  });
-  for (const url of ["https://evil.example", "https://github.com.evil.example", "http://github.com/login/device", "https://user:pass@github.com", "https://github.com:444", "https://", "not-json"]) {
-    assert.equal((await call(handler(ctx, "/open"), { method: "POST", body: { url } })).code, 400, url);
-  }
-  assert.equal(launches.length, 0);
-  for (const url of ["https://github.com/login/device", "https://company.ghe.com/login/device", 'https://github.com/login/device?value="&$(echo probe)']) {
-    assert.equal((await call(handler(ctx, "/open"), { method: "POST", body: { url } })).code, 200);
-    const launch = launches.at(-1);
-    assert.equal(launch.options.shell, false);
-    assert.equal(launch.args.at(-1), new URL(url).href);
-    assert.equal(launch.args.length, process.platform === "win32" ? 2 : 1);
-    assert.match(launch.command, /(?:rundll32\.exe|open)$/);
-  }
-});
-
-test("open 支持 JSON 流并暴露启动失败", async (t) => {
-  const ctx = makeCtx(t);
-  t.mock.method(childProcess, "execFile", (command, args, options, callback) => callback(new Error("launch failed")));
-  const body = Buffer.from(JSON.stringify({ url: "https://github.com/login/device" }));
-  const { Readable } = await import("node:stream");
-  const req = Readable.from([body]);
-  req.headers = { host: "127.0.0.1:8815" };
-  req.method = "POST";
-  const res = { code: 0, body: null, writeHead(code) { this.code = code; }, end(body) { this.body = JSON.parse(body); } };
-  await handler(ctx, "/open")(req, res);
-  assert.equal(res.code, 500);
-  assert.equal(res.body.error, "launch failed");
 });

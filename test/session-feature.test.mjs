@@ -324,17 +324,6 @@ test("one public owner registers managed and pinned routes only after request-st
   await feature.dispose();assert.equal(f.stateDisposed(),1);assert.equal(f.services.has("copilotManagedDefault"),false);
 });
 
-test("explicit model refresh forces selected account metadata without changing another default or binding",async()=>{
-  const f=fixture(),feature=await createSessionAccountFeature(f.ctx,f.options);
-  const before=structuredClone(f.records.get(A).payload), selected=structuredClone(f.agent.selected);
-  const outcome=await feature.refreshModels(A);
-  assert.equal(outcome.refreshed,true);assert.equal(f.refreshCalls(),1);
-  assert.deepEqual(f.agent.selected,selected,"model refresh must not select/rebind a Session");
-  assert.equal(f.globalId(),B,"model refresh must not change global default");
-  assert.equal(f.records.get(A).payload.refresh,before.refresh);
-  assert.deepEqual(f.records.get(A).payload.availableModelIds,["gpt-5.4"]);
-  await feature.dispose();
-});
 
 test("explicit default action acknowledges after managed reconcile but never rebinds pinned or prepared calls",async()=>{
   const f=fixture(),feature=await createSessionAccountFeature(f.ctx,f.options);

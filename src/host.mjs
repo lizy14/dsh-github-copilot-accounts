@@ -402,6 +402,9 @@ async function loadUsage(ctx, slot, domain) {
 // replace global fetch/dispatcher or print proxy URL values from this plugin.
 export function apply(ctx) {
   const r = routes();
+  // Route registration is owned by this plugin lifecycle, so HMR/reinstall
+  // never leaves duplicate exact routes in a running Host.
+  const register = (route) => ctx.effect(() => ctx.webServer.register(route), "copilot-auth route");
   let attempt = emptyState();
   let lastSyncError;
   let sessionFeature, hostDisposed = false, signInPending = false;
@@ -540,7 +543,7 @@ export function apply(ctx) {
   // 启动延迟刷新（登录时 pi-ai 已拿到 fresh token，不必立刻刷）。
   scheduleRefresh(25 * 60 * 1000);
 
-  ctx.webServer.register({
+  register({
     kind: "exact",
     path: r.start,
     handler: async (req, res) => {
@@ -564,7 +567,7 @@ export function apply(ctx) {
       let domain;
       if (kind === "ghe.com") {
         domain = normalizeDomain(body.domain);
-        if (domain === null || !domain.includes(".")) {
+        if (domain === null || !domain.endsWith(".ghe.com") || !domain.split(".").every((label) => /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label))) {
           json(res, 400, { ok: false, error: 'ghe.com sign-in needs a domain like "company.ghe.com"' });
           return;
         }
@@ -636,7 +639,7 @@ export function apply(ctx) {
     },
   });
 
-  ctx.webServer.register({
+  register({
     kind: "exact",
     path: r.state,
     handler: (req, res) => {
@@ -692,7 +695,7 @@ export function apply(ctx) {
         || a.domain.localeCompare(b.domain) || a.id.localeCompare(b.id));
       return { accounts, signingIn: attempt.status === "running", syncError: lastSyncError };
   };
-  ctx.webServer.register({
+  register({
     kind: "exact",
     path: r.accounts,
     handler: async (req, res) => {
@@ -710,31 +713,6 @@ export function apply(ctx) {
     if (result.error !== undefined) throw accountActionError(result.error, "ACCOUNT_PROFILE_FAILED", result.code);
     const avatarUrl = result.slot.payload.account?.avatarUrl;
     return { ok: true, ...(typeof avatarUrl === "string" ? { avatarUrl } : {}) };
-  };
-  const refreshModelsById = async (id) => {
-    const { slot } = selectSlot(await listAccountSlots(ctx), { id });
-    if (!slot || removedSessionAccounts.has(id)) throw accountActionError("no such account", "ACCOUNT_UNAVAILABLE", 404);
-    if (!sessionFeature || sessionFeature.status?.phase !== "ready" || typeof sessionFeature.refreshModels !== "function") {
-      throw accountActionError("model refresh is unavailable", "ACCOUNT_RUNTIME_UNAVAILABLE", 503);
-    }
-    try {
-      await sessionFeature.refreshModels(id);
-      const refreshed = await ctx.credentials.readRecord(id), main = await ctx.credentials.readRecord(CREDENTIAL_KEY);
-      // Only mirror model/auth facts to the native global route if this exact
-      // slot is already the global default. Do not select or switch accounts.
-      if (isGrant(refreshed) && isGrant(main) && sameGrant(refreshed.payload, main.payload)) {
-        await ctx.credentials.modifyRecord(CREDENTIAL_KEY, (current) => isGrant(current) && sameGrant(current.payload, refreshed.payload)
-          ? { kind: "grant", payload: { ...current.payload, access: refreshed.payload.access, expires: refreshed.payload.expires,
-            ...(Array.isArray(refreshed.payload.availableModelIds) ? { availableModelIds: refreshed.payload.availableModelIds } : {}) } }
-          : undefined);
-        await sync(); // protected no-op when the user owns models/modelOverrides.
-      }
-      await notifySessionFeature("reconcile");
-      return { ok: true };
-    } catch (error) {
-      if (error?.code === "ACCOUNT_UNAVAILABLE") throw accountActionError("account changed", "ACCOUNT_UNAVAILABLE", 409);
-      throw accountActionError("model refresh failed", "ACCOUNT_MODEL_REFRESH_FAILED", 502);
-    }
   };
   const setDefaultAccountById = (id) => serializeGlobalAccountMutation(async () => {
     if (attempt.status === "running" || signInPending) throw accountActionError("finish or cancel sign-in first", "SIGN_IN_PROGRESS", 409);
@@ -761,7 +739,7 @@ export function apply(ctx) {
   });
 
   // 图片加载失败时按 id 请求一次新资料；没有 URL 参数，不能变成头像/认证代理。
-  ctx.webServer.register({
+  register({
     kind: "exact",
     path: r.profile,
     handler: async (req, res) => {
@@ -786,27 +764,7 @@ export function apply(ctx) {
     },
   });
 
-  // Explicit account model permission refresh. It accepts only our opaque slot id;
-  // the server derives all native endpoints/auth from its stored grant.
-  ctx.webServer.register({
-    kind: "exact",
-    path: r.models,
-    handler: async (req, res) => {
-      if (!guard(req, res, "POST")) return;
-      let body;
-      try { body = await readJsonBody(req); } catch { json(res, 400, { ok: false, error: "invalid JSON body" }); return; }
-      if (typeof body?.id !== "string" || body.id === "") { json(res, 400, { ok: false, error: "account id required" }); return; }
-      try { json(res, 200, await refreshModelsById(body.id)); }
-      catch (error) {
-        const status = Number.isInteger(error?.status) ? error.status : 500;
-        const message = error?.code === "ACCOUNT_UNAVAILABLE" ? "account unavailable"
-          : error?.code === "ACCOUNT_RUNTIME_UNAVAILABLE" ? "model refresh unavailable" : "model refresh failed";
-        json(res, status, { ok: false, error: message });
-      }
-    },
-  });
-
-  ctx.webServer.register({
+  register({
     kind: "exact",
     path: r.activate,
     handler: async (req, res) => {
@@ -844,7 +802,7 @@ export function apply(ctx) {
     },
   });
 
-  ctx.webServer.register({
+  register({
     kind: "exact",
     path: r.logout,
     handler: async (req, res) => {
@@ -907,7 +865,7 @@ export function apply(ctx) {
   // ctx.authorization.cancel(key) 会 abort 内部 AbortController，
   // 使 begin() 的 attempt() resolve 为 cancelled，finally 删除 running 条目，
   // 下次 begin() 不再报 ALREADY_IN_FLIGHT。
-  ctx.webServer.register({
+  register({
     kind: "exact",
     path: r.cancel,
     handler: (req, res) => {
@@ -922,7 +880,7 @@ export function apply(ctx) {
 
   // OAuth verification link only: validated URL + argv-only OS opener.
   // No shell interpolation, arbitrary destination or diagnostic URL echo.
-  ctx.webServer.register({
+  register({
     kind: "exact",
     path: r.open,
     handler: async (req, res) => {
@@ -939,7 +897,7 @@ export function apply(ctx) {
   // pi-ai OAuthCredentials.expires 可能是毫秒或秒（不同版本），用启发式判断。
   // login/avatarUrl 不在 OAuth payload 里——它们存在插件槽位记录的
   // account.meta 中，whoami 交叉引用槽位补齐身份。
-  ctx.webServer.register({
+  register({
     kind: "exact",
     path: r.whoami,
     handler: async (req, res) => {
@@ -1006,7 +964,7 @@ export function apply(ctx) {
   });
 
   // 手动刷新 access token：用于 token 实际已失效但 expires 未到期时强制刷新。
-  ctx.webServer.register({
+  register({
     kind: "exact",
     path: r.refresh,
     handler: async (req, res) => {
@@ -1021,7 +979,7 @@ export function apply(ctx) {
   });
 
   // DEBUG 路由：诊断代理/网络状态
-  ctx.webServer.register({
+  register({
     kind: "exact",
     path: `${ROUTE_PREFIX}/debug`,
     handler: async (req, res) => {

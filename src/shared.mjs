@@ -21,7 +21,6 @@ export const routes = () => ({
   open: `${ROUTE_PREFIX}/open`,
   whoami: `${ROUTE_PREFIX}/whoami`,
   refresh: `${ROUTE_PREFIX}/refresh`,
-  models: `${ROUTE_PREFIX}/models`,
 });
 
 export const emptyState = () => ({

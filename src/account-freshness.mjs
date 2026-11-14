@@ -82,12 +82,10 @@ export function createAccountFreshness({ credentials, refreshAccess, now = Date.
     abort(signal);
     if (allowed !== true) throw fail("Copilot account is unavailable", "ACCOUNT_UNAVAILABLE");
   };
-  const forceInFlight = new Map();
-  async function ensureAccountFresh({ accountId, signal } = {}, manual = false) {
+  async function ensureAccountFresh({ accountId, signal } = {}) {
     if (typeof accountId !== "string" || !SLOT.test(accountId)) throw fail("Invalid Copilot account slot", "INVALID_ACCOUNT_ID");
     await enabled(accountId, signal);
     const cachedOutcome = (record, at) => {
-      if (manual) return undefined;
       const payload = record.payload;
       const account = object(payload.account) ? payload.account : {};
       const identity = fingerprint(payload);
@@ -179,23 +177,5 @@ export function createAccountFreshness({ credentials, refreshAccess, now = Date.
     if (!outcome) throw fail("Copilot account freshness is unavailable", "ACCOUNT_REFRESH_FAILED");
     return outcome;
   }
-  const ensure = (options = {}) => ensureAccountFresh(options, false);
-  // Manual refresh owns a bounded execution independent of any click's signal.
-  // Each caller may cancel only its own wait; a double click shares one writer
-  // lock/HTTP refresh and cannot create a second credential update.
-  ensure.force = ({ accountId, signal } = {}) => {
-    if (typeof accountId !== "string" || !SLOT.test(accountId)) return Promise.reject(fail("Invalid Copilot account slot", "INVALID_ACCOUNT_ID"));
-    if (signal?.aborted) return Promise.reject(signal.reason);
-    let operation = forceInFlight.get(accountId);
-    if (!operation) {
-      operation = ensureAccountFresh({ accountId }, true);
-      forceInFlight.set(accountId, operation);
-      void operation.then(
-        () => { if (forceInFlight.get(accountId) === operation) forceInFlight.delete(accountId); },
-        () => { if (forceInFlight.get(accountId) === operation) forceInFlight.delete(accountId); },
-      );
-    }
-    return waitFor(operation, signal);
-  };
-  return ensure;
+  return ensureAccountFresh;
 }

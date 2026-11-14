@@ -4,14 +4,11 @@
 // … 菜单 / Plan + AI credits 进度条）+「Add account」下拉两种登录入口
 // （GitHub.com / GitHub Enterprise Cloud）。
 // 文案走 locale 服务（en/zh 词典，随系统语言切换）；
-// Settings navigation uses published settings.section metadata and host icon.
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+// 侧栏图标：壳的 navIcon(id) 对未知 id 回落齿轮且不开放注册，故用
+// MutationObserver 把本节导航行的齿轮替换为单色 Copilot 图标
+// （octicons copilot-16，fill=currentColor，浅/深主题自动一致）。
+import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Modal } from "@deepseek-ai/dsh-client-ui-primitives";
-import { createAvatarRecovery } from "./avatar-recovery.mjs";
-import { avatarImageCache } from "./avatar-cache-scope.mjs";
-import { accountLabel, accountQuotaRemaining, combinedAccountUsage, createSessionBadgeController, deriveSessionBadgeState, sessionBadgeErrorKey } from "./session-badge-state.mjs";
-import { utcMonthProgress } from "./usage-month.mjs";
 
 export const name = "copilot-auth-ui";
 export const inject = ["slots", "locale"];
@@ -34,18 +31,10 @@ const DICTS = {
     setDefault: "Set as default",
     signOut: "Remove account",
     updateAuth: "Update authorization",
-    refreshModels: "Refresh models",
-    refreshModelsFailed: "Model refresh failed. Try again later.",
     managePlan: "Manage plan",
     plan: "Plan",
     credits: "AI credits (resets monthly)",
-    creditsWithReset: "AI credits (resets monthly, next reset {date})",
     creditsNote: "AI credits are consumed based on model and token usage.",
-    combinedUsed: "Combined used",
-    combinedUsageHint: "Sum of account percentages, not a weighted credit balance. Organization accounts may share a billing pool.",
-    usageMonth: "{month} UTC · {elapsed} days elapsed · {remaining} days left",
-    usageCursor: "Used {used}% · UTC month elapsed {time}%",
-    usageValue: "Used {used}%",
     resetsOn: "Resets on",
     unlimited: "Unlimited quota",
     noAccounts: "No connected accounts yet. Use “Add account” to sign in.",
@@ -85,40 +74,6 @@ const DICTS = {
     badgeUsed: "used",
     badgeResets: "resets",
     badgeQuotaRemaining: "Quota left",
-    badgeQuotaPrefix: "Left",
-    badgeSessionAccounts: "Accounts for this Session",
-    badgeFollowingGlobal: "Following global default",
-    badgeSessionBound: "Bound to this Session",
-    badgeNotInUse: "Copilot not in use",
-    badgeUnavailable: "Accounts unavailable",
-    badgeBoundUnavailable: "Bound account unavailable",
-    badgeNoDefault: "No global default account",
-    badgeUnknownQuota: "Quota unavailable",
-    badgeUnmanaged: "Unmanaged credentials; account identity is unknown",
-    badgeUseSession: "Use for this Session",
-    badgeFollowGlobal: "Follow global default",
-    badgeSetGlobalDefault: "Set global default",
-    badgeGlobalDefault: "Global default",
-    badgeGlobalHint: "Affects Sessions following the global default, not independently bound Sessions",
-    badgeRefresh: "Refresh",
-    badgeRunningHint: "Session running. Wait until it is idle to change its account.",
-    badgeHistoryHint: "Subsequent requests, including this conversation's existing history, are sent through the selected account and service.",
-    badgeRowUnavailable: "Unavailable",
-    badgeRouteUnavailable: "Session route unavailable",
-    badgeFailureTitle: "Request continuation failed",
-    badgeFailureBody: "Rebuildable request state was reset; chat history is preserved. Review the error before trying again.",
-    badgeClose: "Close",
-    badgeErrorOwner: "Only the Host owner can manage Copilot accounts.",
-    badgeErrorForbidden: "Access to this Session was denied.",
-    badgeErrorBusy: "Wait until this Session is idle before changing its account.",
-    badgeErrorRestart: "Restart DSH to apply compaction policy for this account.",
-    badgeErrorInactive: "Select a Copilot model before binding an account.",
-    badgeErrorStale: "The Session, model or Host changed. Refresh account choices.",
-    badgeErrorAccount: "The selected account is no longer available.",
-    badgeErrorModel: "This account does not support the current model or reasoning controls.",
-    badgeErrorUnavailable: "The Session account service is unavailable on this Host.",
-    badgeErrorCancelled: "The account request was cancelled.",
-    badgeErrorRequest: "The account operation failed. Refresh choices before trying again.",
   },
   zh: {
     nav: "Copilot 账号",
@@ -137,18 +92,10 @@ const DICTS = {
     setDefault: "设为默认",
     signOut: "移除账号",
     updateAuth: "更新授权",
-    refreshModels: "刷新模型",
-    refreshModelsFailed: "模型刷新失败，请稍后重试。",
     managePlan: "管理套餐",
     plan: "套餐",
     credits: "AI 额度（按月重置）",
-    creditsWithReset: "AI 额度（按月重置，下次重置日期 {date}）",
     creditsNote: "AI 额度消耗取决于模型与 token 用量。",
-    combinedUsed: "合计已用",
-    combinedUsageHint: "按各账号百分比相加，并非额度加权值；组织账号可能共用计费池。",
-    usageMonth: "UTC {month} · 已过 {elapsed} 天 · 还剩 {remaining} 天",
-    usageCursor: "额度已用 {used}% · UTC 本月已过 {time}%",
-    usageValue: "额度已用 {used}%",
     resetsOn: "重置日期",
     unlimited: "不限量",
     noAccounts: "还没有已登录账号。点「添加账号」开始登录。",
@@ -188,40 +135,6 @@ const DICTS = {
     badgeUsed: "已使用",
     badgeResets: "重置",
     badgeQuotaRemaining: "剩余额度",
-    badgeQuotaPrefix: "余",
-    badgeSessionAccounts: "当前会话的账号",
-    badgeFollowingGlobal: "跟随全局默认",
-    badgeSessionBound: "已绑定当前会话",
-    badgeNotInUse: "当前未使用 Copilot",
-    badgeUnavailable: "账号服务不可用",
-    badgeBoundUnavailable: "绑定账号不可用",
-    badgeNoDefault: "尚无全局默认账号",
-    badgeUnknownQuota: "额度不可用",
-    badgeUnmanaged: "未托管凭据，账号身份未知",
-    badgeUseSession: "用于当前会话",
-    badgeFollowGlobal: "跟随全局默认",
-    badgeSetGlobalDefault: "设为全局默认",
-    badgeGlobalDefault: "全局默认",
-    badgeGlobalHint: "影响跟随全局默认的会话，不改变已独立绑定的会话",
-    badgeRefresh: "刷新",
-    badgeRunningHint: "会话正在运行，请等待空闲后再更改绑定账号。",
-    badgeHistoryHint: "切换后，后续请求（包括当前对话的已有历史）会通过所选账号及其服务发送。",
-    badgeRowUnavailable: "不可用",
-    badgeRouteUnavailable: "会话路由不可用",
-    badgeFailureTitle: "请求续接失败",
-    badgeFailureBody: "已重置可重建的请求状态，聊天记录保留。请查看错误后重试。",
-    badgeClose: "关闭",
-    badgeErrorOwner: "只有此 Host 的所有者可以管理 Copilot 账号。",
-    badgeErrorForbidden: "无权访问当前会话。",
-    badgeErrorBusy: "请等待当前会话空闲后再更改账号。",
-    badgeErrorRestart: "请重启 DSH，以加载此账号的压缩策略。",
-    badgeErrorInactive: "请先选择 Copilot 模型，再绑定账号。",
-    badgeErrorStale: "会话、模型或 Host 已变化，请刷新账号列表。",
-    badgeErrorAccount: "所选账号已不可用。",
-    badgeErrorModel: "该账号不支持当前模型或推理设置。",
-    badgeErrorUnavailable: "此 Host 的会话账号服务不可用。",
-    badgeErrorCancelled: "账号请求已取消。",
-    badgeErrorRequest: "账号操作失败，请刷新列表后再重试。",
   },
 };
 
@@ -283,6 +196,47 @@ const SPINNER_STYLE = '<style>@keyframes copilot-spin{to{transform:rotate(360deg
 const CHEVRON_DOWN_SVG =
   '<svg aria-hidden="true" width="12" height="12" viewBox="0 0 16 16" fill="currentColor" style="flex:none;margin-left:4px;vertical-align:middle">' +
   '<path d="M12.78 5.22a.749.749 0 0 1 0 1.06l-4.25 4.25a.749.749 0 0 1-1.06 0L3.22 6.28a.749.749 0 1 1 1.06-1.06L8 8.939l3.72-3.719a.749.749 0 0 1 1.06 0Z"/></svg>';
+
+// 壳的导航行 button 结构固定为 [<svg class=navIcon*>, <span class=navLabel*>]，
+// 按 label 文本找到本节那一行：隐藏齿轮 svg、紧随其后插入 Copilot svg
+//（继承原 svg 的 class 以复用尺寸/主题样式；不删除 React 管理的节点）。
+function enforceNavIcon(labelText) {
+  if (!labelText) return;
+  for (const cell of document.querySelectorAll("button")) {
+    const spans = cell.querySelectorAll("span");
+    const labelSpan = spans[spans.length - 1];
+    if (!labelSpan || labelSpan.textContent !== labelText) continue;
+    if (cell.dataset.copilotIcon === "1") continue;
+    const gear = cell.querySelector("svg");
+    if (!gear) continue;
+    gear.style.display = "none";
+    const holder = document.createElement("span");
+    holder.innerHTML = COPILOT_ICON_SVG;
+    const svg = holder.firstElementChild;
+    const cls = gear.className && typeof gear.className === "object" ? gear.className.baseVal : gear.className;
+    if (cls) svg.setAttribute("class", cls);
+    cell.dataset.copilotIcon = "1";
+    gear.after(svg);
+  }
+}
+
+function startNavIconEnforcer(getLabelText) {
+  if (typeof document === "undefined" || typeof MutationObserver === "undefined") return;
+  let queued = false;
+  const run = () => {
+    queued = false;
+    try {
+      enforceNavIcon(getLabelText());
+    } catch { /* DOM 未就绪时等下一次 mutation 再试 */ }
+  };
+  const schedule = () => {
+    if (queued) return;
+    queued = true;
+    queueMicrotask(run);
+  };
+  new MutationObserver(schedule).observe(document.body, { childList: true, subtree: true, characterData: true });
+  schedule();
+}
 
 const styles = {
   section: { maxWidth: 720, display: "flex", flexDirection: "column", gap: 12, fontFamily: "inherit" },
@@ -351,33 +305,12 @@ const styles = {
     fontFamily: "inherit" },
 };
 
-// Both avatar views use the same one-shot profile recovery. URL changes reset
-// failed state; the returned URL is retried unchanged, including its signature.
-function useAvatarRecovery(id, src, onRecovered, requestProfile, scopeKey, isCurrent) {
-  const controllerRef = useRef(null);
-  if (controllerRef.current === null) controllerRef.current = createAvatarRecovery();
-  const controller = controllerRef.current;
-  controller.configure(id, src, scopeKey !== undefined || requestProfile !== undefined ? { scopeKey, requestProfile, isCurrent } : undefined);
-  const callbackRef = useRef(onRecovered);
-  callbackRef.current = onRecovered;
-  const [, rerender] = useState(0);
-  useEffect(() => {
-    const unsubscribe = controller.subscribe(() => rerender((value) => value + 1));
-    controller.mount();
-    // A cached image can fail before the passive effect subscribes. Synchronize
-    // the current snapshot once, including any error/recovery in that gap.
-    rerender((value) => value + 1);
-    return () => { unsubscribe(); controller.unmount(); };
-  }, [controller]);
-  const state = controller.snapshot();
-  return { ...state, onError: () => { void controller.fail(state.revision, (nextSource) => callbackRef.current?.(nextSource)); } };
-}
-
-// Loading failures keep the initial-letter fallback while one refresh is pending.
-function Avatar({ id, src, name, size = 36, onRecovered }) {
-  const image = useAvatarRecovery(id, src, onRecovered);
+// 头像：外链（avatars.githubusercontent.com）可能被 CSP 拦截，onError 回落
+// 首字母圆。
+function Avatar({ src, name, size = 36 }) {
+  const [broken, setBroken] = useState(false);
   const initial = (name ?? "?").trim().charAt(0).toUpperCase() || "?";
-  if (!image.source || image.failed) {
+  if (!src || broken) {
     return (
       <div style={{ ...styles.avatarFallback, width: size, height: size, fontSize: Math.round(size * 0.45) }}>
         {initial}
@@ -385,92 +318,52 @@ function Avatar({ id, src, name, size = 36, onRecovered }) {
     );
   }
   return (
-    <img key={image.revision} src={image.source} alt="" width={size} height={size} style={styles.avatar}
-      referrerPolicy="no-referrer" onError={image.onError} />
+    <img src={src} alt="" width={size} height={size} style={styles.avatar}
+      onError={() => setBroken(true)} />
   );
 }
 
-function useUsageClock() {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 60_000); return () => clearInterval(timer); }, []);
-  return now;
-}
-function UsageMonthSummary({ now, t, menu = false }) {
-  const month = utcMonthProgress(now), fraction = Math.min(100, Math.max(0, month.elapsedPercent));
-  const label = t("usageMonth").replace("{month}", month.key).replace("{elapsed}", month.elapsedDays.toFixed(1)).replace("{remaining}", month.remainingDays.toFixed(1));
-  return <div data-usage-month title={`${month.start} — ${month.end}`} style={{ ...styles.muted, padding: menu ? "4px 12px 8px" : "0 0 10px" }}>
-    <div>{label}</div>
-    <div data-usage-legend style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4 }}>
-      <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><i aria-hidden="true" style={{ width: 7, height: 7, borderRadius: "50%", background: "#4c6ef5" }} />{t("badgeUsed")}</span>
-      <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}><i aria-hidden="true" style={{ width: 7, height: 7, background: "#d9a441", transform: "rotate(45deg)" }} />UTC</span>
-      <div data-month-track role="img" aria-label={`UTC ${month.elapsedPercent.toFixed(1)}%`} style={{ position: "relative", flex: 1, maxWidth: 120, height: 4, borderRadius: 2, background: "rgba(128,128,128,0.25)" }}>
-        <span data-month-marker style={{ position: "absolute", top: "50%", left: `${fraction}%`, width: 8, height: 8, background: "#d9a441", border: "1px solid var(--dsh-bg, #fff)", transform: "translate(-50%, -50%) rotate(45deg)" }} />
-      </div>
-    </div>
-  </div>;
-}
-function UsageProgress({ percent, now, t }) {
-  const month = utcMonthProgress(now);
-  const used = Number.isFinite(percent) ? percent : null;
-  const bounded = (value) => Math.min(100, Math.max(0, value));
-  const title = t("usageCursor").replace("{used}", used === null ? "—" : used.toFixed(1)).replace("{time}", month.elapsedPercent.toFixed(1));
-  const base = { position: "absolute", top: "50%", border: "1px solid var(--dsh-bg, #fff)", transform: "translate(-50%, -50%)" };
-  return <div data-usage-track role="img" aria-label={title} title={title} style={{ ...styles.barTrack, position: "relative", overflow: "visible" }}>
-    {used !== null && <><div style={{ ...styles.barFill, width: `${bounded(used)}%`, borderRadius: "inherit", opacity: 0.55 }} />
-      <span data-usage-marker style={{ ...base, left: `${bounded(used)}%`, width: 9, height: 9, borderRadius: "50%", background: "#4c6ef5", zIndex: 3 }} /></>}
-    <span data-month-marker title={`UTC ${new Date(now).toISOString().slice(0, 10)} · ${month.elapsedPercent.toFixed(1)}%`}
-      style={{ ...base, left: `${bounded(month.elapsedPercent)}%`, width: 8, height: 8, borderRadius: 0, background: "#d9a441", transform: "translate(-50%, -50%) rotate(45deg)", zIndex: 2 }} />
-  </div>;
-}
-
 // Plan + AI credits 块：plan / 进度条 / 重置日期全部缺字段即隐藏对应元素。
-function UsageBlock({ t, plan, usage, usageError, now }) {
+function UsageBlock({ t, plan, usage, usageError }) {
   if (usageError) {
     return <p style={styles.muted}>{t("usageFailed")}：{usageError}</p>;
   }
   if (!plan && !usage) return null;
   const percent = usage?.unlimited ? undefined : usage?.percentUsed;
-  const knownPercent = Number.isFinite(percent);
-  const hasReset = typeof usage?.resets === "string" && usage.resets !== "";
-  const creditTitle = hasReset ? t("creditsWithReset").replace("{date}", usage.resets) : t("credits");
   return (
     <div style={styles.planBlock}>
       {plan !== undefined && (
-        <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
-          <span style={styles.planTitle}>{t("plan")}</span>
-          <span style={styles.planValue}>{plan}</span>
-        </div>
+        <>
+          <div style={styles.planTitle}>{t("plan")}</div>
+          <div style={styles.planValue}>{plan}</div>
+        </>
       )}
-      {(knownPercent || usage?.unlimited === true || hasReset) && (
-        <div style={{ ...styles.creditsRow, gap: 12 }}>
-          <span>{creditTitle}</span>
-          {usage?.unlimited === true ? <span title={t("unlimited")} style={{ flex: "none" }}>∞</span>
-            : knownPercent && <span style={{ flex: "none", fontVariantNumeric: "tabular-nums" }}>{Math.round(Math.max(0, Math.min(100, percent)))}%</span>}
-        </div>
+      {usage?.unlimited === true && <div style={styles.muted}>{t("unlimited")}</div>}
+      {typeof percent === "number" && (
+        <>
+          <div style={styles.creditsRow}>
+            <span>{t("credits")}</span>
+            <span>{Math.round(percent)}%</span>
+          </div>
+          <div style={styles.barTrack}>
+            <div style={{ ...styles.barFill, width: `${Math.min(100, Math.max(0, percent))}%` }} />
+          </div>
+        </>
       )}
-      {knownPercent && <UsageProgress percent={percent} now={now} t={t} />}
+      {usage?.resets !== undefined && (
+        <div style={styles.muted}>{t("resetsOn")} {usage.resets}</div>
+      )}
+      <div style={styles.muted}>{t("creditsNote")}</div>
     </div>
   );
 }
 
-function CombinedUsage({ accounts, t, menu = false }) {
-  const combined = combinedAccountUsage(accounts);
-  if (!combined.visible) return null;
-  const used = combined.used === null ? "—" : `${combined.used}%`;
-  const capacity = combined.capacity === null ? "∞" : `${combined.capacity}%`;
-  return <div data-combined-usage title={t("combinedUsageHint")} aria-description={t("combinedUsageHint")}
-    style={{ padding: menu ? "8px 12px" : "0 0 10px", fontSize: 13, fontWeight: 500,
-      fontVariantNumeric: "tabular-nums", borderBottom: menu ? "1px solid rgba(128,128,128,0.15)" : undefined }}>
-    {t("combinedUsed")} {used} / {capacity}
-  </div>;
-}
-
-function AccountCard({ t, account, now, busy, menuOpen, onToggleMenu, onActivate, onLogout, onUpdateAuth, onRefreshModels, onManagePlan, onAvatarRecovered }) {
+function AccountCard({ t, account, busy, menuOpen, onToggleMenu, onActivate, onLogout, onUpdateAuth, onManagePlan }) {
   const title = account.name ?? account.login ?? t("legacyAccount");
   return (
     <div style={styles.card}>
       <div style={styles.cardTop}>
-        <Avatar id={account.id} src={account.avatarUrl} name={account.name ?? account.login} onRecovered={onAvatarRecovered} />
+        <Avatar src={account.avatarUrl} name={account.name ?? account.login} />
         <div style={styles.who}>
           <div style={styles.nameRow}>
             <span style={styles.name}>{title}</span>
@@ -504,14 +397,6 @@ function AccountCard({ t, account, now, busy, menuOpen, onToggleMenu, onActivate
                 type="button"
                 style={{ ...styles.menuItem, ...(busy ? styles.menuItemDisabled : null) }}
                 disabled={busy}
-                onClick={onRefreshModels}
-              >
-                {t("refreshModels")}
-              </button>
-              <button
-                type="button"
-                style={{ ...styles.menuItem, ...(busy ? styles.menuItemDisabled : null) }}
-                disabled={busy}
                 onClick={onManagePlan}
               >
                 {t("managePlan")}
@@ -528,13 +413,12 @@ function AccountCard({ t, account, now, busy, menuOpen, onToggleMenu, onActivate
           )}
         </div>
       </div>
-      <UsageBlock t={t} now={now} plan={account.plan} usage={account.usage} usageError={account.usageError} />
+      <UsageBlock t={t} plan={account.plan} usage={account.usage} usageError={account.usageError} />
     </div>
   );
 }
 
 function CopilotSection({ t = (key) => DICTS.en[key] ?? key }) {
-  const now = useUsageClock();
   const [accounts, setAccounts] = useState(null); // null = 加载中
   const [signing, setSigning] = useState(null); // 进行中的 attempt（/state 快照）
   const [error, setError] = useState(undefined);
@@ -742,16 +626,6 @@ function CopilotSection({ t = (key) => DICTS.en[key] ?? key }) {
     await start(kind, domainValue);
   };
 
-  const refreshModels = async (id) => {
-    if (typeof id !== "string" || id === "") return;
-    setMenuFor(null); setBusy(true);
-    try {
-      const res = await fetch("/copilot-auth/models", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id }) });
-      if (!res.ok) setError(t("refreshModelsFailed"));
-    } catch { setError(t("refreshModelsFailed")); }
-    await refreshAccounts(); setBusy(false);
-  };
-
   // 管理套餐：打开 GitHub 设置页。
   const managePlan = (account) => {
     setMenuFor(null);
@@ -953,8 +827,6 @@ function CopilotSection({ t = (key) => DICTS.en[key] ?? key }) {
         <p style={styles.error}>{error}</p>
       )}
 
-      <CombinedUsage accounts={accounts} t={t} />
-      <UsageMonthSummary now={now} t={t} />
       {accounts === null ? (
         <p style={styles.sub}>{t("loading")}</p>
       ) : accounts.length === 0 && signing === null ? (
@@ -965,21 +837,17 @@ function CopilotSection({ t = (key) => DICTS.en[key] ?? key }) {
             key={account.id}
             t={t}
             account={account}
-            now={now}
             busy={busy}
             menuOpen={menuFor !== null && menuFor === account.id}
             onToggleMenu={() => setMenuFor((v) => (v === account.id ? null : account.id))}
             onActivate={() => activate(account.id)}
             onLogout={() => logout(account.id)}
             onUpdateAuth={() => updateAuth(account)}
-            onRefreshModels={() => refreshModels(account.id)}
             onManagePlan={() => managePlan(account)}
-            onAvatarRecovered={refreshAccounts}
           />
         ))
       )}
 
-      {accounts?.length > 0 && <p style={{ ...styles.muted, marginTop: 4 }}>{t("creditsNote")}</p>}
       {syncError && <p style={styles.muted}>sync: {syncError}</p>}
     </div>
   );
@@ -991,192 +859,337 @@ const BADGE_COPILOT_SVG =
   '<path d="M7.998 15.035c-4.562 0-7.873-2.914-7.998-3.749V9.338c.085-.628.677-1.686 1.588-2.065.013-.07.024-.143.036-.218.029-.183.06-.384.126-.612-.201-.508-.254-1.084-.254-1.656 0-.87.128-1.769.693-2.484.579-.733 1.494-1.124 2.724-1.261 1.206-.134 2.262.034 2.944.765.05.053.096.108.139.165.044-.057.094-.112.143-.165.682-.731 1.738-.899 2.944-.765 1.23.137 2.145.528 2.724 1.261.566.715.693 1.614.693 2.484 0 .572-.053 1.148-.254 1.656.066.228.098.429.126.612.924.385 1.522 1.471 1.591 2.095v1.872c0 .766-3.351 3.795-8.002 3.795Zm0-1.485c2.28 0 4.584-1.11 5.002-1.433V7.862l-.023-.116c-.49.21-1.075.291-1.727.291-1.146 0-2.059-.327-2.71-.991A3.222 3.222 0 0 1 8 6.303a3.24 3.24 0 0 1-.544.743c-.65.664-1.563.991-2.71.991-.652 0-1.236-.081-1.727-.291l-.023.116v4.255c.419.323 2.722 1.433 5.002 1.433ZM6.762 2.83c-.193-.206-.637-.413-1.682-.297-1.019.113-1.479.404-1.713.7-.247.312-.369.789-.369 1.554 0 .793.129 1.171.308 1.371.162.181.519.379 1.442.379.853 0 1.339-.235 1.638-.54.315-.322.527-.827.617-1.553.117-.935-.037-1.395-.241-1.614Zm4.155-.297c-1.044-.116-1.488.091-1.681.297-.204.219-.358.679-.242 1.614.091.726.303 1.231.618 1.553.299.305.784.54 1.638.54.922 0 1.28-.198 1.442-.379.179-.2.308-.578.308-1.371 0-.765-.123-1.242-.37-1.554-.233-.296-.693-.587-1.713-.7Z"/>' +
   '<path d="M6.25 9.037a.75.75 0 0 1 .75.75v1.501a.75.75 0 0 1-1.5 0V9.787a.75.75 0 0 1 .75-.75Zm4.25.75v1.501a.75.75 0 0 1-1.5 0V9.787a.75.75 0 0 1 1.5 0Z"/></svg>';
 
+// 打开 DSH 设置页并定位到 Copilot section。
+// DSH desktop 没有公开 API 让外部组件打开设置页（SettingsRoot 的 open 状态
+// 是 component-local React state，不在任何 store 里），所以只能走 DOM：
+// 1. 点击侧栏「账号菜单」trigger（aria-haspopup="menu"，宽栏文字「更多」）
+// 2. 在 portal 菜单里点 button[role="menuitem"]「设置」
+// 3. 等 [role="dialog"] 设置面板渲染，再点 nav 里文本含 "copilot" 的 section
+// 全程输出 console.log/warn，便于在 DevTools 排查 DOM 选择器失配。
+async function openCopilotSettings() {
+  // 菜单是 portal 渲染，且 primitives Menu 会同时挂一份 visibility:hidden 的
+  // 测量副本，必须只认屏幕上真实可见、有尺寸的元素。
+  const isVisible = (el) => {
+    if (el.closest('[aria-hidden="true"]')) return false;
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  };
+  // MutationObserver 等待 check() 返回非空，比固定 setTimeout 稳。
+  const waitFor = (check, timeout) => new Promise((resolve) => {
+    const existing = check();
+    if (existing) { resolve(existing); return; }
+    const observer = new MutationObserver(() => {
+      const el = check();
+      if (el) { observer.disconnect(); resolve(el); }
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+    setTimeout(() => { observer.disconnect(); resolve(null); }, timeout);
+  });
+  try {
+    // DSH desktop 0.1.7 的设置入口在侧栏「账号菜单」里：
+    //   trigger 是 button[aria-haspopup="menu"]，aria-label 随语言为
+    //   「账号菜单」/「Account menu」；窄栏只有省略号图标，宽栏文字「更多」。
+    const moreButton = Array.from(document.querySelectorAll("button"))
+      .find((b) => {
+        if (!isVisible(b)) return false;
+        const label = b.getAttribute("aria-label");
+        const text = (b.textContent || "").trim();
+        return label === "账号菜单" || label === "Account menu" || text === "更多" || text === "More";
+      });
+    if (!moreButton) {
+      console.warn("[copilot-auth] account-menu ('更多') button not found");
+      return;
+    }
+    console.log("[copilot-auth] found account-menu button, clicking to open menu");
+    moreButton.click();
+
+    // 菜单项 button[role="menuitem"] 内部结构 = 图标 span + 文本 span +
+    // 可选快捷键 kbd 串（Win 默认绑定 Ctrl+,，故整串 textContent 是
+    // 「设置Ctrl,」而非「设置」），只能用前缀匹配，且只点可见的那份。
+    // 最多等 2.5 秒。
+    const settingsItem = await waitFor(() => {
+      const candidates = document.querySelectorAll('button[role="menuitem"], [role="menuitem"]');
+      for (const el of candidates) {
+        if (!isVisible(el)) continue;
+        const text = (el.textContent || "").trim();
+        if (text === "设置" || text.startsWith("设置") || text === "Settings" || text.startsWith("Settings")) {
+          return el;
+        }
+      }
+      return null;
+    }, 2500);
+
+    if (!settingsItem) {
+      console.warn("[copilot-auth] '设置' menu item not found after opening account menu");
+      return;
+    }
+    console.log("[copilot-auth] found '设置' menu item, clicking to open settings panel");
+    settingsItem.click();
+
+    // 等「设置面板」就绪：可见的 [role="dialog"] 出现且内部 nav button 渲染完。
+    // React 渲染是异步的，dialog 元素先出现 nav 子树后渲染，必须等 nav
+    // button 有了再匹配。超时 5 秒。
+    const panel = await waitFor(() => {
+      const dialogs = document.querySelectorAll('[role="dialog"]');
+      for (const d of dialogs) {
+        if (!isVisible(d)) continue;
+        if (d.querySelectorAll("nav button").length > 0) return d;
+      }
+      return null;
+    }, 5000);
+
+    if (!panel) {
+      console.warn("[copilot-auth] settings panel with nav did not appear within 5s");
+      return;
+    }
+    console.log("[copilot-auth] settings panel rendered");
+
+    // SettingsRoot.tsx L78 navCell 的 textContent = icon + label，
+    // 本节 label = "Copilot 账号"/"Copilot Accounts"，小写后含 "copilot"。
+    const navButtons = panel.querySelectorAll("nav button");
+    const target = Array.from(navButtons).find((b) => {
+      const text = (b.textContent || "").toLowerCase();
+      return text.includes("copilot");
+    });
+
+    if (target) {
+      console.log("[copilot-auth] matched nav button:", target.textContent);
+      target.click();
+    } else {
+      console.warn("[copilot-auth] no nav button matched 'copilot'");
+      console.log("[copilot-auth] available nav texts:",
+        Array.from(navButtons).map((b) => b.textContent));
+    }
+  } catch (err) {
+    console.warn("[copilot-auth] openCopilotSettings error:", err);
+  }
+}
+
 // 账号头像：风格对齐 DSH AccountAvatar（圆形成片、object-fit:cover、
 // referrerPolicy=no-referrer、加载失败兜底）。弹窗身份行与账号切换列表共用，
 // 保证两处头像尺寸/兜底完全一致。
-const EMPTY_AVATAR_IMAGE = Object.freeze({ status: "invalid", hasImage: false, failureRevision: 0 });
-function AccountAvatar({ id, issuer, slot = "row", url, login, size = 18, onRecovered, requestProfile, scopeKey, isCurrent }) {
-  const containerRef = useRef(null), leaseRef = useRef(null), ownerRef = useRef(null), guardRef = useRef(isCurrent), errorRef = useRef(null);
-  guardRef.current = isCurrent;
-  if (ownerRef.current === null || ownerRef.current.scopeKey !== scopeKey || ownerRef.current.id !== id || ownerRef.current.issuer !== issuer || ownerRef.current.slot !== slot) {
-    const owner = { scopeKey, id, issuer, slot, recoveryScope: {} };
-    owner.current = () => { try { return ownerRef.current === owner && typeof guardRef.current === "function" && guardRef.current() === true; } catch { return false; } };
-    ownerRef.current = owner;
-  }
-  const owner = ownerRef.current;
-  const image = useAvatarRecovery(id, url, (nextSource) => {
-    const held = leaseRef.current;
-    if (!owner.current() || held?.owner !== owner) return;
-    if (typeof nextSource === "string" && nextSource !== "") void held.lease.refresh(nextSource).catch(() => {});
-    return onRecovered?.(nextSource);
-  }, requestProfile, owner.recoveryScope, owner.current);
-  errorRef.current = image.onError;
-  const [cached, setCached] = useState({ owner: null, value: EMPTY_AVATAR_IMAGE });
-  const enabled = scopeKey !== null && typeof scopeKey === "object" && typeof issuer === "string" && issuer !== "" && typeof id === "string" && id !== "" && typeof image.source === "string" && image.source !== "";
-  useLayoutEffect(() => {
-    if (!enabled || !owner.current()) return;
-    let lease;
-    try { lease = avatarImageCache.acquire({ scope: scopeKey, issuer, accountId: id, slot, source: image.source, isCurrent: owner.current }); }
-    catch { setCached({ owner, value: EMPTY_AVATAR_IMAGE }); return; }
-    const held = { owner, lease }; leaseRef.current = held;
-    let live = true, seenFailure = lease.snapshot().failureRevision ?? 0;
-    const sync = () => {
-      if (!live || !owner.current()) return;
-      const value = lease.snapshot(); setCached({ owner, value });
-      if (value.reason === "load-failed" && value.failureRevision > seenFailure) {
-        seenFailure = value.failureRevision;
-        queueMicrotask(() => { if (live && owner.current()) errorRef.current?.(); });
-      }
-    };
-    const unsubscribe = lease.subscribe(sync), detach = lease.attach(containerRef.current);
-    sync();
-    return () => { live = false; unsubscribe(); detach(); lease.release(); if (leaseRef.current === held) leaseRef.current = null; };
-  }, [owner, enabled]);
-  // Ordinary signed-URL rotation does not force a new load inside the soft TTL.
-  useLayoutEffect(() => { const held = leaseRef.current; if (held?.owner === owner && owner.current() && image.source) held.lease.updateSource(image.source); }, [owner, image.source]);
-  const state = enabled && cached.owner === owner ? cached.value : EMPTY_AVATAR_IMAGE;
-  const direct = state.status === "fallback" && ["capacity", "slot-in-use", "oversized"].includes(state.reason) && image.source && !image.failed;
-  const box = { width: size, height: size, borderRadius: "50%", flex: "none", display: "inline-flex", alignItems: "center", justifyContent: "center", overflow: "hidden", background: "#adb5bd" };
-  return <span style={box}>
-    <span ref={containerRef} style={{ width: "100%", height: "100%", display: state.hasImage ? "block" : "none" }} />
-    {direct ? <img key={image.revision} src={image.source} alt="" referrerPolicy="no-referrer" onError={image.onError}
-      style={{ width: "100%", height: "100%", objectFit: "cover", display: "block", borderRadius: "50%" }} />
-      : !state.hasImage && <span style={{ fontSize: Math.round(size * 0.55), color: "#fff", fontWeight: 600 }}>{(login ?? "?")[0]?.toUpperCase() ?? "?"}</span>}
-  </span>;
-}
-
-const EMPTY_SESSION_BADGE = { status: "loading", catalog: null, errorCode: null, busy: false, running: false, scopeKey: {}, requestProfile: undefined };
-function useSessionBadge(sessionId, sessions) {
-  const [state, setState] = useState(EMPTY_SESSION_BADGE);
-  useEffect(() => {
-    let live = true, controller;
-    try { controller = createSessionBadgeController({ sessionId, sessions }); }
-    catch {
-      setState({ ...EMPTY_SESSION_BADGE, status: "unavailable", errorCode: "SESSION_UNAVAILABLE", sessionId, sessions });
-      return;
-    }
-    const publish = () => { if (live) setState({ ...controller.getSnapshot(), controller, sessionId, sessions }); };
-    const unsubscribe = controller.subscribe(publish);
-    publish();
-    void controller.refresh();
-    const timer = setInterval(() => { void controller.refresh(); }, 30000);
-    return () => { live = false; clearInterval(timer); unsubscribe(); controller.dispose(); };
-  }, [sessionId, sessions]);
-  // New props must not display the previous Session before effect cleanup runs.
-  return state.sessionId === sessionId && state.sessions === sessions ? state : EMPTY_SESSION_BADGE;
-}
-
-function CopilotBadge({ sessionId, sessions, t = (k) => DICTS.en[k] ?? k }) {
-  const now = useUsageClock();
-  const runtime = useSessionBadge(sessionId, sessions);
-  const [open, setOpen] = useState(false);
-  const badgeRef = useRef(null);
-  const ready = runtime.status === "ready";
-  const view = deriveSessionBadgeState(runtime.catalog, { busy: runtime.busy || !ready, running: runtime.running });
-  useEffect(() => { setOpen(false); }, [sessionId, runtime.scopeKey]);
-  useEffect(() => { if (runtime.failureNotice != null) setOpen(false); }, [runtime.failureNotice?.id]);
-  const refresh = () => runtime.controller?.refresh(true);
-  const mutate = async (method, accountId) => {
-    const accepted = await runtime.controller?.[method](accountId);
-    if (accepted && method === "bind") setOpen(false);
+function AccountAvatar({ url, login, size = 18 }) {
+  const [failed, setFailed] = useState(false);
+  const box = {
+    width: size, height: size, borderRadius: "50%", flex: "none",
+    display: "inline-flex", alignItems: "center", justifyContent: "center",
+    overflow: "hidden", background: "#adb5bd",
   };
-  const selectedLabel = view.account ? accountLabel(view.account, t("legacyAccount")) : undefined;
-  const selectedBound = view.mode === "bound" ? view.accounts.find((account) => account.id === view.selectedAccountId) : undefined;
-  const canOfferGlobal = selectedBound !== undefined && selectedBound.available !== false && selectedBound.id !== view.globalAccountId;
-  const statusLabel = !ready ? runtime.status === "loading" ? t("loading") : t("badgeUnavailable")
-    : view.mode === "inactive" ? t("badgeNotInUse") : view.unavailable ? t(view.mode === "bound" ? "badgeBoundUnavailable" : "badgeUnavailable")
-      : view.unmanaged ? "—" : !view.account ? t("badgeNoDefault") : view.remaining !== null ? `${t("badgeQuotaPrefix")} ${view.remaining}%`
-        : view.unlimited ? "∞" : t("badgeUnknownQuota");
-  const title = [selectedLabel, view.unmanaged ? t("badgeUnmanaged") : view.mode === "bound" ? t("badgeSessionBound") : view.mode === "global" ? t("badgeFollowingGlobal") : undefined,
-    view.remaining !== null ? `${t("badgeQuotaRemaining")} ${view.remaining}%` : statusLabel,
-    view.running ? t("badgeRunningHint") : undefined, t("badgeHistoryHint"),
-  ].filter(Boolean).join(" · ");
-  const rect = badgeRef.current?.getBoundingClientRect();
-  const popupStyle = rect ? {
-    position: "fixed", left: Math.max(8, Math.min(rect.left, window.innerWidth - 320)),
-    bottom: window.innerHeight - rect.top + 4, minWidth: Math.min(320, window.innerWidth - 16),
-    maxWidth: "calc(100vw - 16px)", maxHeight: "70vh", overflowY: "auto",
-    background: "var(--dsh-bg, #fff)", color: "var(--dsh-fg, inherit)",
-    border: "1px solid rgba(128,128,128,0.3)", borderRadius: 8,
-    boxShadow: "0 4px 12px rgba(0,0,0,0.15)", zIndex: 100001,
+  if (url && !failed) {
+    return (
+      <span style={box}>
+        <img
+          src={url}
+          alt=""
+          referrerPolicy="no-referrer"
+          onError={() => setFailed(true)}
+          style={{ width: "100%", height: "100%", objectFit: "cover", display: "block", borderRadius: "50%" }}
+        />
+      </span>
+    );
+  }
+  return (
+    <span style={{ ...box, fontSize: Math.round(size * 0.55), color: "#fff", fontWeight: 600 }}>
+      {(login ?? "?")[0]?.toUpperCase() ?? "?"}
+    </span>
+  );
+}
+
+function CopilotBadge({ t = (k) => DICTS.en[k] ?? k }) {
+  const [whoami, setWhoami] = useState(null);
+  const [accounts, setAccounts] = useState(null);
+  const [open, setOpen] = useState(false);
+  const [switching, setSwitching] = useState(null);
+  const timer = useRef(null);
+  const badgeRef = useRef(null);
+
+  const refresh = () => {
+    fetch("/copilot-auth/whoami").then((r) => r.json()).then((d) => setWhoami(d)).catch(() => {});
+    fetch("/copilot-auth/accounts").then((r) => r.json()).then((d) => setAccounts(d?.accounts ?? [])).catch(() => {});
+  };
+
+  useEffect(() => {
+    refresh();
+    timer.current = setInterval(refresh, 30000);
+    return () => { if (timer.current) clearInterval(timer.current); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const switchAccount = async (id) => {
+    if (typeof id !== "string" || id === "") return;
+    setOpen(false);
+    setSwitching(id);
+    try {
+      await fetch("/copilot-auth/activate", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id }),
+      });
+      refresh();
+    } catch { /* 静默 */ }
+    setSwitching(null);
+  };
+
+  const badgeOpacity = whoami?.configured ? 1 : 0.5;
+  // 剩余额度 = 100 - 已用百分比（进度条 >80% 变红，对应剩余 <20%）。
+  // Math.round 消除浮点误差（100 - 69.2 = 30.799999...）。
+  const used = whoami?.usagePercent;
+  const quotaRemaining = typeof used === "number"
+    ? Math.round(Math.max(0, Math.min(100, 100 - used))) : null;
+  const lowQuota = quotaRemaining !== null && quotaRemaining < 20;
+
+  if (!whoami) {
+    return (
+      <span className="copilot-badge" style={{ opacity: badgeOpacity }}>
+        <span dangerouslySetInnerHTML={{ __html: BADGE_COPILOT_SVG }} />
+        <span className="copilot-badge-label" style={{ opacity: 0.4 }}>…</span>
+      </span>
+    );
+  }
+
+  if (!whoami.configured) {
+    return (
+      <span className="copilot-badge" title={t("badgeClickToSignIn")}
+        onClick={() => openCopilotSettings()}>
+        <span dangerouslySetInnerHTML={{ __html: BADGE_COPILOT_SVG }} />
+        <span className="copilot-badge-label">{t("badgeNotSignedIn")}</span>
+      </span>
+    );
+  }
+
+  const badgeTitle = [
+    whoami.login,
+    quotaRemaining !== null && `${t("badgeQuotaRemaining")} ${quotaRemaining}%`,
+  ].filter(Boolean).join(" · ") || undefined;
+
+  // 弹窗用 position: fixed 渲染到根堆叠上下文，避免被侧边栏（Files 面板）
+  // 等高层级 DOM 盖住。坐标从徽标 getBoundingClientRect 实时计算。
+  const badgeRect = badgeRef.current?.getBoundingClientRect();
+  const popupStyle = badgeRect ? {
+    position: "fixed",
+    left: badgeRect.left,
+    bottom: window.innerHeight - badgeRect.top + 4,
+    background: "var(--dsh-bg, #fff)", border: "1px solid rgba(128,128,128,0.3)",
+    borderRadius: 8, boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
+    padding: 0, minWidth: 280, maxWidth: 320, zIndex: 100001,
+    overflow: "hidden",
   } : null;
-  const actionStyle = { border: "none", borderRadius: 4, background: "transparent", color: "inherit", fontFamily: "inherit", cursor: "pointer" };
-  const avatarProps = { requestProfile: runtime.requestProfile, scopeKey: runtime.scopeKey, isCurrent: runtime.isCurrent, onRecovered: refresh };
+
   return (
     <div style={{ position: "relative", flex: "none" }} ref={badgeRef}>
-      <button type="button" className="copilot-badge" title={title} aria-description={t("badgeHistoryHint")} aria-expanded={open}
-        style={{ opacity: view.account ? 1 : 0.55 }}
-        onClick={() => { setOpen((value) => !value); if (!open) void refresh(); }}>
+      <span className="copilot-badge" title={badgeTitle} onClick={() => setOpen((v) => !v)}>
         <span dangerouslySetInnerHTML={{ __html: BADGE_COPILOT_SVG }} />
-        <span className="copilot-badge-label" style={view.remaining !== null && view.remaining < 20 ? { color: "#e03131" } : undefined}>{statusLabel}</span>
-      </button>
-      {open && runtime.failureNotice == null && popupStyle && createPortal(<>
-        <div style={{ position: "fixed", inset: 0, zIndex: 100000 }} onClick={() => setOpen(false)} />
-        <div role="dialog" aria-label={t("badgeSessionAccounts")} aria-description={t("badgeHistoryHint")} aria-busy={runtime.busy} style={popupStyle}>
-          <CombinedUsage accounts={view.accounts} t={t} menu />
-          <UsageMonthSummary now={now} t={t} menu />
-          <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", borderBottom: "1px solid rgba(128,128,128,0.15)" }}>
-            {view.account && <AccountAvatar id={view.account.id} issuer={view.account.domain} slot="header" url={view.account.avatarUrl} login={view.account.login} {...avatarProps} />}
-            <span title={selectedLabel} style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 13, fontWeight: 600 }}>{selectedLabel ?? "GitHub Copilot"}</span>
-            <button type="button" style={{ ...actionStyle, padding: "2px 6px" }} aria-label={t("cancel")} onClick={() => setOpen(false)}>×</button>
-          </div>
-          {view.used !== null && <div style={{ padding: "8px 12px" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", gap: 12, fontSize: 12, marginBottom: 6 }}>
-              <span>{Math.round(view.used)}% {t("badgeUsed")}</span>
-              {view.resets && <span style={{ opacity: 0.6 }}>{t("badgeResets")} {view.resets}</span>}
+        {/* logo 后只显示剩余额度百分比 */}
+        {quotaRemaining !== null && (
+          <span className="copilot-badge-label" style={lowQuota ? { color: "#e03131" } : undefined}>
+            {quotaRemaining}%
+          </span>
+        )}
+      </span>
+      {open && createPortal(
+        <>
+          <div style={{ position: "fixed", inset: 0, zIndex: 100000 }} onClick={() => setOpen(false)} />
+          <div style={popupStyle}>
+            {/* 标题栏：Plan 名称 + 设置按钮 */}
+            <div style={{
+              display: "flex", alignItems: "center", justifyContent: "space-between",
+              padding: "8px 12px", borderBottom: "1px solid rgba(128,128,128,0.15)",
+            }}>
+              <span style={{ fontSize: 13, fontWeight: 600 }}>
+                {whoami.plan ?? "Copilot"}
+              </span>
+              <button type="button" title={t("nav")}
+                style={{
+                  border: "none", background: "transparent", cursor: "pointer",
+                  padding: 4, borderRadius: 4,
+                  color: "var(--dsh-fg, currentColor)", opacity: 0.65,
+                  display: "inline-flex", alignItems: "center", lineHeight: 0,
+                }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setOpen(false);
+                  openCopilotSettings();
+                }}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="12" cy="12" r="3" />
+                  <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+                </svg>
+              </button>
             </div>
-            <UsageProgress percent={view.used} now={now} t={t} />
-          </div>}
-          {runtime.errorCode && <div role="alert" style={{ padding: "4px 12px 8px", fontSize: 12, color: "#e03131" }}>{t(sessionBadgeErrorKey(runtime.errorCode))}</div>}
-          <button type="button" title={view.running ? t("badgeRunningHint") : t("badgeFollowGlobal")}
-            disabled={!view.canBind || view.followsGlobal} onClick={() => { void mutate("bind", null); }}
-            style={{ ...actionStyle, display: "flex", gap: 8, alignItems: "center", width: "100%", padding: "8px 12px", textAlign: "left", fontSize: 13, opacity: view.canBind ? 1 : 0.5 }}>
-            <span style={{ flex: 1 }}>{t("badgeFollowGlobal")}</span>{view.followsGlobal && <span>✓</span>}
-          </button>
-          <div style={{ borderTop: "1px solid rgba(128,128,128,0.15)", padding: "4px 0" }}>
-            {view.accounts.map((account) => {
-              const selected = view.mode === "bound" && view.selectedAccountId === account.id;
-              const accountUnavailable = account.available === false;
-              const rowUnavailable = accountUnavailable || account.routeAvailable === false;
-              const label = accountLabel(account, t("legacyAccount"));
-              const quota = accountQuotaRemaining(account);
-              const quotaTitle = quota.kind === "unknown" ? t("badgeUnknownQuota") : quota.kind === "unlimited" ? t("unlimited") : `${t("badgeQuotaRemaining")} ${quota.text}`;
-              const hint = view.running ? t("badgeRunningHint") : rowUnavailable ? t(accountUnavailable ? "badgeRowUnavailable" : "badgeRouteUnavailable") : t("badgeHistoryHint");
-              return <button key={account.id} type="button" title={`${label} · ${hint}`} aria-label={`${t("badgeUseSession")}: ${label}`} aria-description={quotaTitle}
-                disabled={!view.canBind || selected || rowUnavailable} onClick={() => { void mutate("bind", account.id); }}
-                style={{ ...actionStyle, display: "flex", alignItems: "center", gap: 8, width: "100%", padding: "7px 12px", textAlign: "left", fontSize: 13,
-                  background: selected ? "rgba(76,109,245,0.08)" : "transparent", opacity: !view.canBind || rowUnavailable ? 0.5 : 1 }}>
-                <AccountAvatar id={account.id} issuer={account.domain} slot="row" url={account.avatarUrl} login={account.login} {...avatarProps} />
-                <span title={label} style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label}</span>
-                <span data-account-quota={account.id} title={quotaTitle} aria-label={quotaTitle}
-                  style={{ flex: "none", minWidth: "3ch", textAlign: "right", whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums",
-                    color: quota.kind === "percent" && quota.remaining < 20 ? "#e03131" : "inherit", opacity: quota.kind === "unknown" ? 0.55 : 0.8 }}>{quota.text}</span>
-                <span aria-hidden="true" style={{ flex: "none", width: "1em", textAlign: "center" }}>{selected ? "✓" : ""}</span>
-              </button>;
-            })}
+            {/* 用量区 */}
+            {whoami.usagePercent !== null && whoami.usagePercent !== undefined && (
+              <div style={{ padding: "10px 12px" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, marginBottom: 6, opacity: 0.7 }}>
+                  <span>{t("badgeUsage")}</span>
+                  {whoami.usageResetDate && <span>{t("badgeResets")} {whoami.usageResetDate}</span>}
+                </div>
+                <div style={{ display: "flex", alignItems: "baseline", gap: 4, marginBottom: 6 }}>
+                  <span style={{ fontSize: 20, fontWeight: 700 }}>{whoami.usagePercent}%</span>
+                  <span style={{ fontSize: 12, opacity: 0.6 }}>{t("badgeUsed")}</span>
+                </div>
+                <div style={{ height: 4, background: "rgba(128,128,128,0.2)", borderRadius: 2, overflow: "hidden" }}>
+                  <div style={{
+                    height: "100%", width: `${whoami.usagePercent}%`,
+                    background: whoami.usagePercent > 80 ? "#e03131" : "#4c6ef5",
+                    borderRadius: 2,
+                  }} />
+                </div>
+              </div>
+            )}
+            {/* 身份行：当前账号头像 + 用户名。
+                排版与下方账号切换列表行一致（18px 圆头像、13px 文字、gap 8）。 */}
+            <div style={{
+              display: "flex", alignItems: "center", gap: 8,
+              padding: "8px 12px",
+              borderTop: whoami.usagePercent !== null && whoami.usagePercent !== undefined
+                ? "none" : "1px solid rgba(128,128,128,0.15)",
+            }}>
+              <AccountAvatar url={whoami.avatarUrl} login={whoami.login} size={18} />
+              <span style={{
+                fontSize: 13, flex: "1 1 auto", minWidth: 0, overflow: "hidden",
+                textOverflow: "ellipsis", whiteSpace: "nowrap",
+              }}>
+                {whoami.login ?? "—"}
+              </span>
+            </div>
+            {/* 账号切换区 */}
+            {accounts && accounts.length > 1 && (
+              <div style={{ borderTop: "1px solid rgba(128,128,128,0.15)", padding: "4px 0" }}>
+                {accounts.map((acc) => {
+                  const active = acc.active;
+                  const label = `${acc.domain}/${acc.login ?? acc.name ?? t("legacyAccount")}`;
+                  return (
+                    <button key={acc.id} type="button"
+                      style={{
+                        display: "flex", alignItems: "center", gap: 8, width: "100%",
+                        padding: "6px 12px", border: "none",
+                        background: active ? "rgba(76,109,245,0.08)" : "transparent",
+                        cursor: active ? "default" : "pointer", fontFamily: "inherit",
+                        fontSize: 13, textAlign: "left", color: "inherit",
+                      }}
+                      disabled={active || switching !== null}
+                      onClick={() => switchAccount(acc.id)}
+                    >
+                      <AccountAvatar url={acc.avatarUrl} login={acc.login} size={18} />
+                      <span title={label} style={{ minWidth: 0, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {label}
+                      </span>
+                      {active && <span style={{ marginLeft: "auto", fontSize: 11, opacity: 0.5 }}>✓</span>}
+                      {switching === acc.id && <span style={{ marginLeft: "auto", fontSize: 11, opacity: 0.5 }}>{t("badgeSwitching")}</span>}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
           </div>
-          <div style={{ borderTop: "1px solid rgba(128,128,128,0.15)", padding: "6px 12px", display: "flex", alignItems: "center", gap: 12 }}>
-            {canOfferGlobal && <button type="button" style={{ ...actionStyle, padding: "3px 0", fontSize: 12 }} title={t("badgeGlobalHint")}
-              disabled={!view.canSetDefault} onClick={() => { void mutate("setDefault", selectedBound.id); }}>{t("badgeSetGlobalDefault")}</button>}
-            <button type="button" style={{ ...actionStyle, marginLeft: "auto", padding: "3px 4px", fontSize: 14 }} title={t("badgeRefresh")} aria-label={t("badgeRefresh")} onClick={() => { void refresh(); }}>↻</button>
-          </div>
-        </div>
-      </>, document.body)}
-      <Modal open={runtime.failureNotice != null} onClose={() => runtime.controller?.dismissFailure()}
-        title={t("badgeFailureTitle")} closeLabel={t("badgeClose")} description={t("badgeFailureBody")} />
+        </>, document.body)}
     </div>
   );
 }
 
-function SettingsCopilotIcon({ size = 20, active = false }) {
-  return <svg aria-hidden="true" width={size} height={size} viewBox="0 0 16 16" fill="currentColor"
-    style={{ display: "block", color: active ? "var(--dsh-accent, #4c6ef5)" : "currentColor" }}>
-    <path d="M7.998 15.035c-4.562 0-7.873-2.914-7.998-3.749V9.338c.085-.628.677-1.686 1.588-2.065.013-.07.024-.143.036-.218.029-.183.06-.384.126-.612-.201-.508-.254-1.084-.254-1.656 0-.87.128-1.769.693-2.484.579-.733 1.494-1.124 2.724-1.261 1.206-.134 2.262.034 2.944.765.05.053.096.108.139.165.044-.057.094-.112.143-.165.682-.731 1.738-.899 2.944-.765 1.23.137 2.145.528 2.724 1.261.566.715.693 1.614.693 2.484 0 .572-.053 1.148-.254 1.656.066.228.098.429.126.612.924.385 1.522 1.471 1.591 2.095v1.872c0 .766-3.351 3.795-8.002 3.795Zm0-1.485c2.28 0 4.584-1.11 5.002-1.433V7.862l-.023-.116c-.49.21-1.075.291-1.727.291-1.146 0-2.059-.327-2.71-.991A3.222 3.222 0 0 1 8 6.303a3.24 3.24 0 0 1-.544.743c-.65.664-1.563.991-2.71.991-.652 0-1.236-.081-1.727-.291l-.023.116v4.255c.419.323 2.722 1.433 5.002 1.433ZM6.762 2.83c-.193-.206-.637-.413-1.682-.297-1.019.113-1.479.404-1.713.7-.247.312-.369.789-.369 1.554 0 .793.129 1.171.308 1.371.162.181.519.379 1.442.379.853 0 1.339-.235 1.638-.54.315-.322.527-.827.617-1.553.117-.935-.037-1.395-.241-1.614Zm4.155-.297c-1.044-.116-1.488.091-1.681.297-.204.219-.358.679-.242 1.614.091.726.303 1.231.618 1.553.299.305.784.54 1.638.54.922 0 1.28-.198 1.442-.379.179-.2.308-.578.308-1.371 0-.765-.123-1.242-.37-1.554-.233-.296-.693-.587-1.713-.7Z" />
-    <path d="M6.25 9.037a.75.75 0 0 1 .75.75v1.501a.75.75 0 0 1-1.5 0V9.787a.75.75 0 0 1 .75-.75Zm4.25.75v1.501a.75.75 0 0 1-1.5 0V9.787a.75.75 0 0 1 1.5 0Z" />
-  </svg>;
-}
-
 export function apply(ctx) {
+  console.log("[copilot-auth] client apply v3 (badge+label+settings-jump)");
   ctx.locale.register("copilot-auth", DICTS);
   const t = ctx.locale.bind("copilot-auth");
   // 注入徽标全局样式：跟 ui-chat 的 StatsPills pill 同款
@@ -1224,17 +1237,11 @@ export function apply(ctx) {
     { name: "settings.section", id: "copilot", order: 11, label: () => t("nav"), inject: () => ({ t }) },
     CopilotSection,
   ));
-  ctx.slots.inject("settings.section.icon", () => ctx.slots.register(
-    { name: "settings.section.icon", id: "copilot", order: 11, label: () => t("nav") },
-    SettingsCopilotIcon,
-  ));
   // 工作区输入栏下方 Copilot 徽标（VSCode 风格）：显示 Copilot logo，
   // 点击弹出账号信息面板（用户名/plan/用量/切换账号）。
-  ctx.inject(["sessions"], (scope) => {
-    const sessions = scope.sessions;
-    scope.slots.inject("conversation.composer.dock", () => scope.slots.register(
-      { name: "conversation.composer.dock", id: "copilot-badge", order: 50, inject: (sessionId) => ({ t, sessionId, sessions }) },
-      CopilotBadge,
-    ));
-  });
+  ctx.slots.inject("conversation.composer.dock", () => ctx.slots.register(
+    { name: "conversation.composer.dock", id: "copilot-badge", order: 50, inject: () => ({ t }) },
+    CopilotBadge,
+  ));
+  startNavIconEnforcer(() => t("nav"));
 }

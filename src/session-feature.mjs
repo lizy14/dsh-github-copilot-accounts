@@ -44,7 +44,7 @@ export async function createSessionAccountFeature(ctx, { listSlots, collectAccou
     || typeof ctx?.on !== "function" || [listSlots, collectAccounts, refreshProfileById, setDefaultAccountById, getProfile, runtimeLoader, requestStateFactory].some((value) => typeof value !== "function")) {
     throw new TypeError("Session feature requires explicit Host capabilities and callbacks");
   }
-  let closed = false, assembled = false, registry, runtime, hub, managed, managedRegistration, remoteFiber, watcher, createdWatcher, markerDisposer, cleanupPromise, llm, requestState, fresh;
+  let closed = false, assembled = false, registry, runtime, hub, managed, managedRegistration, remoteFiber, watcher, createdWatcher, markerDisposer, cleanupPromise, llm, requestState;
   let status = Object.freeze({ phase: "starting", errorCode: null });
   let currentProfile, profileSignature, profileReadable = false, profileTicket = 0;
   let knownDefault, mainAuthUnsupported = false, defaultResolutionTicket = 0;
@@ -220,14 +220,6 @@ export async function createSessionAccountFeature(ctx, { listSlots, collectAccou
     get registry() { return registry; }, get hub() { return hub; }, get managed() { return managed; }, get requestState() { return requestState; },
     get status() { return status; }, get managedDefault() { return managedMarker; },
     reconcile, refreshDefault,
-    async refreshModels(id) {
-      await liveSlot(id, true); requireEnabled();
-      if (typeof fresh?.force !== "function") throw new SessionAccountFeatureError("ACCOUNT_RUNTIME_UNAVAILABLE");
-      const outcome = await fresh.force({ accountId: id }); requireEnabled();
-      await reconcileForRead(); await liveSlot(id, true);
-      if (managed) await refreshDefault();
-      return outcome;
-    },
     async reactivate(id) { await liveSlot(id, true); removed.delete(id); requireEnabled(); if (!registry) throw new SessionAccountFeatureError("ACCOUNT_RUNTIME_UNAVAILABLE"); const rows = await registry.reactivate(id); requireEnabled(); if (managed) await refreshDefault(); return rows; },
     remove(id) {
       accountRouteId(id); removed.add(id); knownDefault = knownDefault?.accountId === id ? undefined : knownDefault;
@@ -259,7 +251,7 @@ export async function createSessionAccountFeature(ctx, { listSlots, collectAccou
     requireEnabled();
     if (["scopeForRequest", "notice", "observeFailures", "dispose"].some((method) => typeof requestState?.[method] !== "function")) throw new SessionAccountFeatureError("ACCOUNT_RUNTIME_UNAVAILABLE");
     hub = createCopilotRouteHub({ LlmAdapter: runtime.LlmAdapter, LlmError: runtime.LlmError, llm });
-    fresh = createAccountFreshness({ credentials: credentialService, refreshAccess: refreshAccess ?? createAccountRefreshHttp({ deriveAuth: runtime.deriveAuth }),
+    const fresh = createAccountFreshness({ credentials: credentialService, refreshAccess: refreshAccess ?? createAccountRefreshHttp({ deriveAuth: runtime.deriveAuth }),
       isEnabled: (id) => enabled() && !removed.has(id), ...(runtime.LlmError === undefined ? {} : { LlmError: runtime.LlmError }) });
     const guardedHub = { registerAdapter(routes, adapter) {
       requireEnabled(); const registered = hub.registerAdapter(routes, adapter);

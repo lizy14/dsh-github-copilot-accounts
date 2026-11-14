@@ -14,7 +14,7 @@ const result = await esbuild.build({
   // React.createElement，而组件未导入默认 React；automatic 产出
   // require("react/jsx-runtime")，与 external 列表匹配。
   jsx: "automatic",
-  external: ["react", "react/jsx-runtime", "react-dom", "@deepseek-ai/dsh-client-ui-primitives"],
+  external: ["react", "react/jsx-runtime", "react-dom"],
   write: false,
   minify: false,
 });
