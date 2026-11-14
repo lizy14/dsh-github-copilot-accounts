@@ -22,6 +22,17 @@ test("every distributed Host module relative import remains inside included sour
   }
 });
 
+test("documented local Node script commands reference existing files", () => {
+  for (const [name, command] of Object.entries(manifest.scripts ?? {})) {
+    const script = /^node\s+([^\s-][^\s]*)/.exec(command)?.[1];
+    if (script) assert.ok(existsSync(resolve(root, script)), "missing script entry: " + name + " -> " + script);
+  }
+  const readme = readFileSync(resolve(root, "README.md"), "utf8");
+  for (const link of readme.matchAll(/\]\((docs\/[^)#]+)(?:#[^)]*)?\)/g)) {
+    assert.ok(existsSync(resolve(root, link[1])), "missing README document: " + link[1]);
+  }
+});
+
 test("published entrypoints import without any running app or credential service", async () => {
   for (const key of [".", "./default-model"]) {
     const target = manifest.exports[key];

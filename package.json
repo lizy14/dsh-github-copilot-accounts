@@ -26,7 +26,6 @@
   "scripts": {
     "build": "node scripts/build-client.mjs",
     "test": "node --test",
-    "test:ui": "node scripts/validate-session-ui.mjs",
     "prepack": "npm run build"
   },
   "engines": {
