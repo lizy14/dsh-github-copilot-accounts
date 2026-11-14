@@ -75,13 +75,13 @@ function makeCtx(t, script = {}) {
         ctx.settings.mutateCalls.push({ ns, ops });
         if (ctx.script.mutateError) throw new Error(ctx.script.mutateError);
       },
-      describe: () => [{ ns: "llm-pi-ai", revision: ctx.script.revision ?? 1, user: ctx.script.userLayer }],
+      describe: () => [{ ns: "llm-pi-ai", revision: ctx.script.revision ?? 1, value: ctx.script.configured ?? { providers: {} }, user: ctx.script.userLayer }],
     },
+    configEditor: { entries: () => [{ ctx: { get: (name) => name === "llm" ? ctx.llm : undefined }, options: { id: "llm-pi-ai", name: "@deepseek-ai/dsh-llm-pi-ai", config: ctx.script.configured ?? { providers: {} } } }] },
     llm: { listModels: async () => ctx.script.served ?? [] },
     logger: { warns: [], warn: (...a) => ctx.logger.warns.push(a) },
     script: { notices: [], served: undefined, userLayer: undefined, ...script },
   };
-  ctx.settings.get = () => ctx.script.configured;
   // fetch 桩：默认一律 500（mock down）——身份/用量失败走各自的降级路径。
   const realFetch = globalThis.fetch;
   globalThis.fetch = async (url, init) => {
@@ -122,7 +122,7 @@ const usageResponse = (plan = "enterprise", percentRemaining = 34) => ({
 test("插件身份与路由注册", (t) => {
   const ctx = makeCtx(t);
   assert.equal(plugin.name, "copilot-auth");
-  assert.deepEqual(plugin.inject, ["webServer", "authorization", "credentials", "settings", "llm"]);
+  assert.deepEqual(plugin.inject, ["webServer", "authorization", "credentials", "settings", "llm", "configEditor"]);
   assert.ok(ctx.routes.every((r) => r.kind === "exact"), "所有路由必须都是 exact");
   assert.deepEqual(ctx.routes.map((r) => r.path).sort(),
     ["/copilot-auth/accounts", "/copilot-auth/activate", "/copilot-auth/cancel", "/copilot-auth/debug",

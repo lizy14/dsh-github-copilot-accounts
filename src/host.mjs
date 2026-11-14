@@ -17,8 +17,10 @@ import {
   ACCOUNT_SCOPE, CREDENTIAL_KEY, ROUTE_PREFIX, accountKey, apiBase, emptyState, isGitHubDomain, normalizeDomain, routes,
 } from "./shared.mjs";
 
+import { readAccountConfig, fillMissingAccountModels } from "./account-config.mjs";
+
 export const name = "copilot-auth";
-export const inject = ["webServer", "authorization", "credentials", "settings", "llm"];
+export const inject = ["webServer", "authorization", "credentials", "settings", "llm", "configEditor"];
 
 // pi-ai 目录数据文件定位层：从进程入口（dsh 可执行文件）逐级向上找
 // node_modules/@earendil-works/pi-ai。
@@ -52,16 +54,9 @@ function readCatalogModelIds() {
   return null;
 }
 
-// 读取解析后的 github-copilot 路由配置（base 层 + 用户层的最终值）。
-// settings 未注入 / 未注册 / 读取失败一律按空处理——回退到可写入分支，
-// 保持既有 turnkey 行为不变。
+// Unknown configuration is not an empty directory and must never permit a write.
 function readConfiguredRoute(ctx) {
-  try {
-    const section = ctx.settings?.get?.("llm-pi-ai");
-    return section?.providers?.["github-copilot"] ?? {};
-  } catch {
-    return {};
-  }
+  return readAccountConfig(ctx.settings, ctx.configEditor, ctx.llm).profile;
 }
 
 // 登录成功/激活后，把账号可用模型写入用户 settings 的模型目录
@@ -75,12 +70,7 @@ async function syncAvailableModels(ctx) {
   const record = await ctx.credentials.readRecord(CREDENTIAL_KEY);
   const available = record?.payload?.availableModelIds;
   if (!Array.isArray(available) || available.length === 0) return;
-  const route = readConfiguredRoute(ctx);
-  const modelsConfigured = route.models !== undefined && route.models !== null;
-  const overridesConfigured = !!route.modelOverrides
-    && typeof route.modelOverrides === "object"
-    && Object.keys(route.modelOverrides).length > 0;
-  if (modelsConfigured || overridesConfigured) return;
+  readConfiguredRoute(ctx); // Validate actual scope/provenance before lookup.
   const catalog = readCatalogModelIds();
   let ids;
   if (catalog) {
@@ -92,9 +82,7 @@ async function syncAvailableModels(ctx) {
     ids = available.filter((id) => served.has(id));
   }
   if (ids.length === 0) return;
-  await ctx.settings.mutate("llm-pi-ai", [
-    { op: "set", path: ["providers", "github-copilot", "models"], value: ids.map((id) => ({ id })) },
-  ]);
+  await fillMissingAccountModels(ctx.settings, ids, ctx.configEditor, ctx.llm);
 }
 
 function sameOrigin(req) {
