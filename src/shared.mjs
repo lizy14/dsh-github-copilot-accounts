@@ -66,4 +66,13 @@ export const accountKey = (login, domain) => `${ACCOUNT_SCOPE}/${accountSlotId(l
 // 身份/用量/token 刷新三端点同构于 api.<domain>（对齐 pi-ai getUrls：
 // copilot_internal/v2/token 就在 api.<domain> 下；ghe.com 租户的 REST
 // 基址同为 api.<域名>）。
-export const apiBase = (domain) => `https://api.${domain}`;
+export function isGitHubDomain(domain) {
+  return typeof domain === "string" && (domain === "github.com"
+    || (domain.length <= 253 && domain.endsWith(".ghe.com")
+      && domain.split(".").every((label) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label))));
+}
+
+export function apiBase(domain) {
+  if (!isGitHubDomain(domain)) throw new Error("invalid GitHub domain");
+  return `https://api.${domain}`;
+}

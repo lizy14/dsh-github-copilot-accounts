@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import childProcess from "node:child_process";
 import plugin from "../src/host.mjs";
-import { accountKey } from "../src/shared.mjs";
+import { accountKey, apiBase } from "../src/shared.mjs";
 
 const MAIN = "llm-pi-ai/github-copilot";
 const ENTERPRISE_PROMPT = { kind: "text", message: "GitHub Enterprise URL/domain (blank for github.com)" };
@@ -34,10 +35,19 @@ function makeStore(initial = {}) {
 function makeCtx(t, script = {}) {
   const ctx = {
     routes: [],
+    effects: [],
+    effect: (execute) => { ctx.effects.push(execute()); },
+    dispose: () => { for (const dispose of ctx.effects.splice(0).reverse()) dispose(); },
     prompts: [],
     promptAnswers: [],
     fetchCalls: [],
-    webServer: { register: (r) => ctx.routes.push(r) },
+    webServer: { register: (r) => {
+      if (ctx.routes.some((route) => route.kind === r.kind && route.path === r.path)) {
+        throw new Error(`webserver: duplicate ${r.kind} route "${r.path}"`);
+      }
+      ctx.routes.push(r);
+      return () => { ctx.routes.splice(ctx.routes.indexOf(r), 1); };
+    } },
     authorization: {
       beginCalls: [],
       begin: async (req) => {
@@ -78,6 +88,7 @@ function makeCtx(t, script = {}) {
     return { ok: false, status: 500, statusText: "mock down", json: async () => ({}) };
   };
   t.after(() => { globalThis.fetch = realFetch; });
+  t.after(() => ctx.dispose());
   plugin.apply(ctx);
   return ctx;
 }
@@ -115,6 +126,44 @@ test("插件身份与路由注册", (t) => {
     ["/copilot-auth/accounts", "/copilot-auth/activate", "/copilot-auth/cancel", "/copilot-auth/debug",
       "/copilot-auth/logout", "/copilot-auth/models", "/copilot-auth/open", "/copilot-auth/profile", "/copilot-auth/refresh", "/copilot-auth/start",
       "/copilot-auth/state", "/copilot-auth/whoami"]);
+});
+
+test("卸载清理全部路由和计时器，同一 webServer 可重新挂载", (t) => {
+  const clear = t.mock.method(globalThis, "clearTimeout");
+  const ctx = makeCtx(t);
+  const paths = ctx.routes.map((route) => route.path);
+  ctx.dispose();
+  assert.equal(ctx.routes.length, 0);
+  assert.equal(clear.mock.callCount(), 1);
+  assert.doesNotThrow(() => plugin.apply(ctx));
+  assert.deepEqual(ctx.routes.map((route) => route.path), paths);
+});
+
+test("部分挂载失败后卸载不遗留已注册路由，也不删除其它插件路由", (t) => {
+  const ctx = makeCtx(t);
+  ctx.dispose();
+  const external = { kind: "exact", path: "/copilot-auth/activate", handler: () => {} };
+  ctx.webServer.register(external);
+  assert.throws(() => plugin.apply(ctx), /duplicate exact route/);
+  ctx.dispose();
+  assert.deepEqual(ctx.routes, [external]);
+});
+
+test("卸载期间在途刷新结束后不重新创建计时器", async (t) => {
+  let release;
+  let started;
+  const pending = new Promise((resolve) => { started = resolve; });
+  const ctx = makeCtx(t, {
+    records: { [MAIN]: { kind: "grant", payload: { refresh: "r0" } } },
+    fetchImpl: () => { started(); return new Promise((resolve) => { release = resolve; }); },
+  });
+  const timers = t.mock.method(globalThis, "setTimeout");
+  const refresh = call(handler(ctx, "/refresh"), { method: "POST" });
+  await pending;
+  ctx.dispose();
+  release({ ok: true, json: async () => ({ token: "fresh", expires_at: 2_000_000_000, refresh_in: 1500 }) });
+  await refresh;
+  assert.equal(timers.mock.callCount(), 0);
 });
 
 test("start/github.com：begin key/method 正确，Enterprise 提问答空串", async (t) => {
@@ -998,4 +1047,55 @@ test("跨站 Origin 拒绝 403，同源/无 Origin 放行", async (t) => {
   const ctx = makeCtx(t);
   assert.equal((await call(handler(ctx, "/start"), { method: "POST", headers: { origin: "http://evil.example" }, body: { kind: "github.com" } })).code, 403);
   assert.equal((await call(handler(ctx, "/accounts"))).code, 200);
+});
+
+test("GHE 登录与凭据 API 拒绝非 GitHub 域名", async (t) => {
+  const ctx = makeCtx(t);
+  for (const domain of ["evil.example", "company.ghe.com.evil.example", "ghe.com", "github.com", "-bad.ghe.com", "company..ghe.com"]) {
+    const res = await call(handler(ctx, "/start"), { method: "POST", body: { kind: "ghe.com", domain } });
+    assert.equal(res.code, 400, domain);
+  }
+  assert.equal(ctx.authorization.beginCalls.length, 0);
+  assert.equal(apiBase("github.com"), "https://api.github.com");
+  assert.equal(apiBase("company.ghe.com"), "https://api.company.ghe.com");
+  assert.throws(() => apiBase("evil.example"), /invalid GitHub domain/);
+  ctx.credentials.records.set(MAIN, { kind: "grant", payload: { refresh: "secret", enterpriseUrl: "evil.example" } });
+  await call(handler(ctx, "/accounts"));
+  await call(handler(ctx, "/refresh"), { method: "POST" });
+  assert.equal(ctx.fetchCalls.length, 0, "异常凭据不得把 token 发往非 GitHub 主机");
+});
+
+test("open 拒绝不可信 URL，合法链接以独立参数启动且不经过 shell", async (t) => {
+  const ctx = makeCtx(t);
+  const launches = [];
+  t.mock.method(childProcess, "execFile", (command, args, options, callback) => {
+    launches.push({ command, args, options });
+    callback(null);
+  });
+  for (const url of ["https://evil.example", "https://github.com.evil.example", "http://github.com/login/device", "https://user:pass@github.com", "https://github.com:444", "https://", "not-json"]) {
+    assert.equal((await call(handler(ctx, "/open"), { method: "POST", body: { url } })).code, 400, url);
+  }
+  assert.equal(launches.length, 0);
+  for (const url of ["https://github.com/login/device", "https://company.ghe.com/login/device", 'https://github.com/login/device?value="&$(echo probe)']) {
+    assert.equal((await call(handler(ctx, "/open"), { method: "POST", body: { url } })).code, 200);
+    const launch = launches.at(-1);
+    assert.equal(launch.options.shell, false);
+    assert.equal(launch.args.at(-1), new URL(url).href);
+    assert.equal(launch.args.length, process.platform === "win32" ? 2 : 1);
+    assert.match(launch.command, /(?:rundll32\.exe|open)$/);
+  }
+});
+
+test("open 支持 JSON 流并暴露启动失败", async (t) => {
+  const ctx = makeCtx(t);
+  t.mock.method(childProcess, "execFile", (command, args, options, callback) => callback(new Error("launch failed")));
+  const body = Buffer.from(JSON.stringify({ url: "https://github.com/login/device" }));
+  const { Readable } = await import("node:stream");
+  const req = Readable.from([body]);
+  req.headers = { host: "127.0.0.1:8815" };
+  req.method = "POST";
+  const res = { code: 0, body: null, writeHead(code) { this.code = code; }, end(body) { this.body = JSON.parse(body); } };
+  await handler(ctx, "/open")(req, res);
+  assert.equal(res.code, 500);
+  assert.equal(res.body.error, "launch failed");
 });
